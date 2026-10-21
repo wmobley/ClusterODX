@@ -4,6 +4,7 @@
     "admin-cli-port": 8080,
     "admin-web-port": 10000,
     "admin-pass": "",
+    "registration-secret": "",
     "admin-session-secret": "change-me",
     "admin-web-use-tapis-jwt": true,
     "admin-web-allowed-tenants": "",

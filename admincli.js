@@ -17,6 +17,7 @@
  */
 const logger = require('./libs/logger');
 const net = require('net');
+const crypto = require('crypto');
 const package_info = require('./package_info');
 const nodes = require('./libs/nodes');
 const routetable = require('./libs/routetable');
@@ -28,11 +29,15 @@ module.exports = {
         logger.info("Starting admin CLI on " + options.port);
 
         if (!options.password){
-            logger.warn(`No admin CLI password specified, make sure port ${options.port} is secured`);
+            const error = new Error("Admin CLI password is required");
+            error.code = "ADMIN_CLI_PASSWORD_REQUIRED";
+            return Promise.reject(error);
         }
 
-        // Start a TCP Server
-        net.createServer(function (socket) {
+        // Start a TCP Server. Return a promise so callers can fail startup
+        // cleanly when the configured port is already in use.
+        return new Promise((resolve, reject) => {
+            const server = net.createServer(function (socket) {
             let loggedIn = false;
             const printCaret = () => {
                 if (loggedIn) socket.write("#> ");
@@ -71,12 +76,7 @@ module.exports = {
 
             // Send a nice welcome message and announce
             socket.write("Welcome " + socket.name + " " + package_info.name + ":" + package_info.version + "\r\n");
-            if (options.password){
-                socket.write("LOGIN <LOGIN> to log-in\r\n");
-            }else{
-                loggedIn = true;
-                socket.write("HELP for help\r\n");
-            }
+            socket.write("LOGIN <LOGIN> to log-in\r\n");
             socket.write("QUIT to quit\r\n");
 
             printCaret();
@@ -242,7 +242,12 @@ module.exports = {
                         invalid();
                     }
                 }else{
-                    if (command === "LOGIN" && args[0] === options.password){
+                    const suppliedPassword = args[0] || "";
+                    const suppliedBuffer = Buffer.from(suppliedPassword);
+                    const expectedBuffer = Buffer.from(options.password);
+                    const passwordMatches = suppliedBuffer.length === expectedBuffer.length &&
+                        crypto.timingSafeEqual(suppliedBuffer, expectedBuffer);
+                    if (command === "LOGIN" && passwordMatches){
                         loggedIn = true;
                         ok();
                         socket.write("HELP for help\r\n");
@@ -254,6 +259,10 @@ module.exports = {
 
                 printCaret();
             });
-        }).listen(options.port);
+            });
+
+            server.once('error', reject);
+            server.listen(options.port, '127.0.0.1', () => resolve(server));
+        });
     }
 };

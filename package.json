@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node test/test-admincli-port.js && node test/test-adminweb-auth.js && node test/test-config-contract.js && node test/test-tapis-local-handoff.js && node test/test-tapis-observability.js && node test/test-tapis-options.js && node test/test-tapis-provider.js && node test/test-tapis-registration.js",
     "winbundle": "node winbundle.js"
   },
   "repository": {
@@ -18,7 +18,6 @@
     "aws-sdk": "^2.466.0",
     "axios": "^0.18.0",
     "busboy": "^0.2.14",
-    "cors": "^2.8.5",
     "express": "^4.16.4",
     "express-basic-auth": "^1.2.0",
     "form-data": "^2.3.3",

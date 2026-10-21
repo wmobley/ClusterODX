@@ -20,7 +20,6 @@ const express = require("express");
 const basicAuth = require("express-basic-auth");
 const nodes = require("./libs/nodes");
 const package_info = require("./package_info");
-const cors = require("cors");
 const netutils = require("./libs/netutils");
 const asrProvider = require("./libs/asrProvider");
 const config = require("./config");
@@ -32,13 +31,35 @@ const { submitPendingTask } = require("./libs/tapisWorker");
 const { classifySubmitError, logHandoffEvent, safeNodeEndpoint } = require("./libs/observability");
 const crypto = require("crypto");
 
+const safeStringEqual = (left, right) => {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+};
+
 module.exports = {
   create: function (options) {
     logger.info("Starting admin web interface on " + options.port);
 
     const app = express();
     app.use(express.json());
-    app.use(cors());
+
+    const rejectForeignOrigin = (req, res, next) => {
+      const origin = req.get("origin");
+      const stateChanging = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
+      if (!stateChanging || !origin) return next();
+      try {
+        const originUrl = new URL(origin);
+        if (originUrl.host !== req.get("host")) {
+          return res.status(403).json({ error: "Cross-origin request rejected" });
+        }
+      } catch (_error) {
+        return res.status(403).json({ error: "Cross-origin request rejected" });
+      }
+      return next();
+    };
+    app.use(rejectForeignOrigin);
 
     // Tapis workers cannot use the admin Basic Auth credentials. This endpoint
     // is therefore authenticated with the request-scoped Tapis token (or an
@@ -138,7 +159,7 @@ module.exports = {
       // A valid Tapis token alone must not be able to claim another user's
       // pending job. The worker token is expected to be the same request token
       // that created the Tapis submission.
-      if (effectiveTapisToken && pending.token && effectiveTapisToken !== pending.token) {
+      if (effectiveTapisToken && pending.token && !safeStringEqual(effectiveTapisToken, pending.token)) {
         logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
           task_id: pending.taskId,
           tapis_job_id: pending.tapisJobId,
@@ -205,19 +226,22 @@ module.exports = {
     });
 
     if (!options.password) {
-      logger.warn(`No admin password specified, make sure port ${options.port} is secured`);
-    } else {
-      app.use(
-        basicAuth({
-          users: { admin: options.password },
-          challenge: true,
-          realm: "ClusterODX",
-        })
-      );
+      logger.warn(`No admin password specified; protected admin APIs are disabled`);
     }
 
     app.use(express.static("public"));
-    app.use(express.json());
+
+    if (options.password) {
+      app.use("/r", basicAuth({
+        users: { admin: options.password },
+        challenge: true,
+        realm: "ClusterODX",
+      }));
+    } else {
+      app.use("/r", (_req, res) => {
+        res.status(503).json({ error: "Admin authentication is not configured" });
+      });
+    }
 
     // API
     app.get("/r/info", (req, res) => {
@@ -272,7 +296,13 @@ module.exports = {
       }
     });
 
-    app.listen(options.port);
+    return new Promise((resolve, reject) => {
+      const onListen = () => resolve(server);
+      const server = options.host
+        ? app.listen(options.port, options.host, onListen)
+        : app.listen(options.port, onListen);
+      server.once("error", reject);
+    });
   },
 };
 

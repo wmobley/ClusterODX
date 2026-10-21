@@ -85,6 +85,13 @@ NodeODX, then adds the route and removes the pending task entry only after a
 successful handoff.
 The token is never written to the ASR configuration or log messages.
 
+Worker registration requires either the request-scoped Tapis bearer token or a
+configured shared secret. Set the latter with `registration-secret` in the
+ClusterODX configuration, or with `worker.registrationSecret` in the Tapis ASR
+configuration. UUIDs and owner fields are metadata, not authentication. The
+admin APIs also require `admin-pass`; passwordless administrative access is
+disabled, and state-changing cross-origin requests are rejected.
+
 ## Handoff observability
 
 ClusterODX and NodeODX emit allowlisted JSON log messages for the worker handoff.
