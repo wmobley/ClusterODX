@@ -221,26 +221,25 @@ module.exports = {
       }
     });
 
-    app.get("/signout", (req, res) => {
-      res.status(401).send('Signed out. <br /> <a href="/">Sign back in</a>');
-    });
-
     if (!options.password) {
-      logger.warn(`No admin password specified; protected admin APIs are disabled`);
-    }
-
-    app.use(express.static("public"));
-
-    if (options.password) {
-      app.use("/r", basicAuth({
-        users: { admin: options.password },
-        challenge: true,
-        realm: "ClusterODX",
-      }));
-    } else {
-      app.use("/r", (_req, res) => {
+      logger.warn(`No admin password specified; protected admin web interface is disabled`);
+      app.use((_req, res) => {
         res.status(503).json({ error: "Admin authentication is not configured" });
       });
+    } else {
+      app.use(
+        basicAuth({
+          users: { admin: options.password },
+          challenge: true,
+          realm: "ClusterODX",
+        })
+      );
+
+      app.get("/signout", (req, res) => {
+        res.status(401).send('Signed out. <br /> <a href="/">Sign back in</a>');
+      });
+
+      app.use(express.static("public"));
     }
 
     // API

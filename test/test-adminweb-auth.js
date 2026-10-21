@@ -31,6 +31,14 @@ const basicAuth = `Basic ${Buffer.from('admin:test-password').toString('base64')
     const port = server.address().port;
 
     try {
+        const shellUnauthenticated = await request(port, '/');
+        assert.strictEqual(shellUnauthenticated.status, 401);
+
+        const shellAuthenticated = await request(port, '/', {
+            headers: { authorization: basicAuth }
+        });
+        assert.strictEqual(shellAuthenticated.status, 200);
+
         const unauthenticated = await request(port, '/r/info');
         assert.strictEqual(unauthenticated.status, 401);
 
@@ -51,6 +59,8 @@ const basicAuth = `Basic ${Buffer.from('admin:test-password').toString('base64')
 
     const unconfigured = await adminweb.create({port: 0});
     try {
+        const shell = await request(unconfigured.address().port, '/');
+        assert.strictEqual(shell.status, 503);
         const response = await request(unconfigured.address().port, '/r/info');
         assert.strictEqual(response.status, 503);
     } finally {

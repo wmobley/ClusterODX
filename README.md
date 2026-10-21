@@ -33,7 +33,7 @@ First, start the program:
 node index.js --admin-pass 'choose-a-password' [parameters]
 ```
 
-The administrative CLI and web APIs require `--admin-pass` (or `admin-pass` in
+The administrative CLI and web interface require `--admin-pass` (or `admin-pass` in
 the configuration). The CLI listens on loopback only. If no password is
 configured, the CLI is disabled and the web administrative APIs return a
 configuration error instead of running without authentication. Set
