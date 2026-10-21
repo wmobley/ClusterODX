@@ -38,6 +38,23 @@ const safeStringEqual = (left, right) => {
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 };
 
+const decodeJwtPayload = (token) => {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
+    const claims = JSON.parse(payload);
+    return claims && typeof claims === 'object' ? claims : null;
+  } catch (_error) {
+    return null;
+  }
+};
+
+const tapisClaim = (claims, name, fallback) => {
+  if (!claims) return null;
+  return claims[`tapis/${name}`] || claims[name] || claims[fallback] || null;
+};
+
 module.exports = {
   create: function (options) {
     logger.info("Starting admin web interface on " + options.port);
@@ -221,7 +238,88 @@ module.exports = {
       }
     });
 
-    if (!options.password) {
+    const useTapisJwt = options.useTapisJwt === true;
+    const allowedTenants = Array.isArray(options.allowedTenants) ? options.allowedTenants : [];
+    const allowedUsers = Array.isArray(options.allowedUsers) ? options.allowedUsers : [];
+
+    const validateTapisAdminToken = async (token) => {
+      const provider = options.tapisProvider || asrProvider.get();
+      if (!provider || typeof provider.validateToken !== 'function') {
+        const error = new Error('Tapis provider is not initialized');
+        error.code = 'TAPIS_UNAVAILABLE';
+        throw error;
+      }
+
+      await provider.validateToken(token);
+
+      const claims = decodeJwtPayload(token);
+      if (claims && claims.exp && Number(claims.exp) * 1000 <= Date.now()) {
+        const error = new Error('Tapis token is expired');
+        error.code = 'TOKEN_INVALID';
+        throw error;
+      }
+
+      const tenant = tapisClaim(claims, 'tenant_id', 'tenantId');
+      const username = tapisClaim(claims, 'username', 'user');
+      if (allowedTenants.length && !allowedTenants.includes(tenant)) {
+        const error = new Error('Tapis tenant is not allowed');
+        error.code = 'ADMIN_FORBIDDEN';
+        throw error;
+      }
+      if (allowedUsers.length && !allowedUsers.includes(username)) {
+        const error = new Error('Tapis user is not allowed');
+        error.code = 'ADMIN_FORBIDDEN';
+        throw error;
+      }
+    };
+
+    const requireTapisJwt = async (req, res, next) => {
+      const token = extractBearerToken(req.headers);
+      if (!token) return res.status(401).json({ error: 'Tapis JWT bearer token required' });
+
+      try {
+        await validateTapisAdminToken(token);
+        return next();
+      } catch (error) {
+        if (error && error.code === 'ADMIN_FORBIDDEN') {
+          return res.status(403).json({ error: 'Tapis identity is not authorized for admin access' });
+        }
+        if (error && error.code === 'TOKEN_INVALID') {
+          return res.status(401).json({ error: 'Tapis JWT is invalid or expired' });
+        }
+        if (error && error.response && [401, 403].includes(error.response.status)) {
+          return res.status(401).json({ error: 'Tapis JWT is invalid or expired' });
+        }
+        return res.status(503).json({ error: 'Tapis authentication is unavailable' });
+      }
+    };
+
+    if (useTapisJwt) {
+      app.use(express.static("public"));
+
+      app.post('/r/auth/validate', async (req, res) => {
+        const token = extractBearerToken(req.headers);
+        if (!token) return res.status(401).json({ error: 'Tapis JWT bearer token required' });
+        try {
+          await validateTapisAdminToken(token);
+          res.set('Cache-Control', 'no-store');
+          return res.json({ authenticated: true });
+        } catch (error) {
+          if (error && error.code === 'ADMIN_FORBIDDEN') {
+            return res.status(403).json({ error: 'Tapis identity is not authorized for admin access' });
+          }
+          if (error && error.code === 'TOKEN_INVALID') {
+            return res.status(401).json({ error: 'Tapis JWT is invalid or expired' });
+          }
+          if (error && error.response && [401, 403].includes(error.response.status)) {
+            return res.status(401).json({ error: 'Tapis JWT is invalid or expired' });
+          }
+          return res.status(503).json({ error: 'Tapis authentication is unavailable' });
+        }
+      });
+
+      app.use('/r', requireTapisJwt);
+    } else if (!options.password) {
       logger.warn(`No admin password specified; protected admin web interface is disabled`);
       app.use((_req, res) => {
         res.status(503).json({ error: "Admin authentication is not configured" });

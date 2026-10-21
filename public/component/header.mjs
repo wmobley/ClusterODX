@@ -1,6 +1,6 @@
 import { html } from "../lib/preact.html.mjs";
 
-export const Header = ({ info }) => {
+export const Header = ({ info, onSignout }) => {
   return html`
     <header class="py=-3">
       <div class="row flex-nowrap justify-content-between align-items-center">
@@ -9,10 +9,10 @@ export const Header = ({ info }) => {
         </div>
 
         <div class="col-4 d-flex justify-content-end align-items-center">
-          <a class="btn btn-sm btn-outline-secondary" href="/signout">
+          <button class="btn btn-sm btn-outline-secondary" type="button" onClick=${onSignout}>
             <i class="bi bi-door-open-fill"></i>
             Signout
-          </a>
+          </button>
         </div>
       </div>
     </header>

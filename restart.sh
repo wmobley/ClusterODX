@@ -27,10 +27,12 @@ fi
 if [[ -z "${CLUSTERODX_ADMIN_PASS:-}" ]] && ! node -e '
 const fs = require("fs");
 const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-process.exit(typeof config["admin-pass"] === "string" && config["admin-pass"].length > 0 ? 0 : 1);
+const hasPassword = typeof config["admin-pass"] === "string" && config["admin-pass"].length > 0;
+const usesTapisJwt = config["admin-web-use-tapis-jwt"] === true;
+process.exit(hasPassword || usesTapisJwt ? 0 : 1);
 ' "${NODE_CONFIG}"; then
     echo "ClusterODX admin authentication is not configured."
-    echo "Set CLUSTERODX_ADMIN_PASS before restarting, or set admin-pass in ${NODE_CONFIG}."
+    echo "Set CLUSTERODX_ADMIN_PASS, set admin-pass in ${NODE_CONFIG}, or enable admin-web-use-tapis-jwt."
     exit 1
 fi
 

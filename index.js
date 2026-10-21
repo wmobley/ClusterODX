@@ -47,7 +47,13 @@ const routetable = require('./libs/routetable');
     }
     if (config.admin_web_port !== 0){
         try {
-            await adminweb.create({port: config.admin_web_port, password: config.admin_pass});
+            await adminweb.create({
+                port: config.admin_web_port,
+                password: config.admin_pass,
+                useTapisJwt: config.admin_web_use_tapis_jwt,
+                allowedTenants: config.admin_web_allowed_tenants,
+                allowedUsers: config.admin_web_allowed_users
+            });
         } catch (error){
             logger.error(`Unable to start admin web interface on port ${config.admin_web_port}: ${error && error.code === 'EADDRINUSE' ? 'address already in use' : (error && error.message ? error.message : error)}`);
             process.exitCode = 1;

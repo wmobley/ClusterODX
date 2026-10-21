@@ -30,17 +30,22 @@ configuration and end-to-end validation limits.
 First, start the program:
 
 ```bash
-node index.js --admin-pass 'choose-a-password' [parameters]
+node index.js [parameters]
 ```
 
-The administrative CLI and web interface require `--admin-pass` (or `admin-pass` in
-the configuration). The CLI listens on loopback only. If no password is
-configured, the CLI is disabled and the web administrative APIs return a
-configuration error instead of running without authentication. Set
-`--admin-cli-port 0` or `--admin-web-port 0` to disable either interface.
+By default, the administrative web interface on port 10000 uses Tapis JWT
+authentication. Open the page and paste a Tapis access token; the token is kept
+only in browser memory and must be sent as a bearer token for each administrative
+API request. Set `admin-web-allowed-tenants` and `admin-web-allowed-users` to
+restrict which Tapis identities may sign in.
 
-When using `restart.sh`, keep the password out of the process command line by
-passing it through the environment:
+The administrative CLI on port 8080 remains password-protected. Set
+`--admin-pass` (or `admin-pass` in the configuration) for the CLI. The same
+password also enables the web interface when `admin-web-use-tapis-jwt` is false.
+Set `--admin-cli-port 0` or `--admin-web-port 0` to disable either interface.
+
+When using `restart.sh`, keep a CLI/fallback password out of the process command
+line by passing it through the environment:
 
 ```bash
 CLUSTERODX_ADMIN_PASS='choose-a-strong-password' ./restart.sh
@@ -49,7 +54,7 @@ CLUSTERODX_ADMIN_PASS='choose-a-strong-password' ./restart.sh
 Or with docker:
 
 ```bash
-docker run --rm -ti -p 3000:3000 -p 8080:8080 webodm/clusterodx [parameters]
+docker run --rm -ti -p 3000:3000 -p 8080:8080 -p 10000:10000 webodm/clusterodx [parameters]
 ```
 
 Or with apptainer, after cd into ClusterODX directory:
@@ -69,7 +74,9 @@ telnet localhost 8080
 
 Finally, use a web browser to connect to `http://localhost:3000`. A normal [NodeODX](https://github.com/WebODM/NodeODX) UI should appear. This means the application is working, as web requests are being properly forwarded to nodes.
 
-You can also check the status of nodes via a web interface available at `http://localhost:10000`.
+You can also check the status of nodes via a web interface available at
+`http://localhost:10000`. With the default JWT mode, paste the Tapis access token
+when prompted.
 
 See `node index.js --help` for all parameter options.
 

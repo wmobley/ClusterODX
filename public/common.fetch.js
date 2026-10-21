@@ -1,8 +1,41 @@
+let adminToken = null;
+
+export const setAdminToken = (token) => {
+  adminToken = token;
+};
+
+export const clearAdminToken = () => {
+  adminToken = null;
+};
+
+const authenticatedHeaders = (headers = {}) => {
+  const result = { ...headers };
+  if (adminToken) result.Authorization = `Bearer ${adminToken}`;
+  return result;
+};
+
+const authenticatedFetch = async (url, options = {}) => {
+  const response = await fetch(url, {
+    ...options,
+    credentials: "same-origin",
+    headers: authenticatedHeaders(options.headers),
+  });
+  if (response.status === 401) {
+    clearAdminToken();
+    window.dispatchEvent(new Event("clusterodx-auth-expired"));
+  }
+  return response;
+};
+
+export const getFetch = async (url) => authenticatedFetch(url, {
+  method: "get",
+  cache: "no-cache",
+});
+
 export const postFetch = async (url, { body }) => {
-  return await fetch(url, {
+  return await authenticatedFetch(url, {
     method: "post",
     cache: "no-cache",
-    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
     },
@@ -11,10 +44,9 @@ export const postFetch = async (url, { body }) => {
 };
 
 export const patchFetch = async (url, { body }) => {
-  return await fetch(url, {
+  return await authenticatedFetch(url, {
     method: "get",
     cache: "no-cache",
-    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
     },
@@ -23,10 +55,9 @@ export const patchFetch = async (url, { body }) => {
 };
 
 export const deleteFetch = async (url, { body }) => {
-  return await fetch(url, {
+  return await authenticatedFetch(url, {
     method: "delete",
     cache: "no-cache",
-    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
     },

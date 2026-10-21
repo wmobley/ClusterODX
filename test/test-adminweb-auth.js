@@ -57,6 +57,65 @@ const basicAuth = `Basic ${Buffer.from('admin:test-password').toString('base64')
         await new Promise(resolve => server.close(resolve));
     }
 
+    const jwtPayload = Buffer.from(JSON.stringify({
+        'tapis/tenant_id': 'portals',
+        'tapis/username': 'operator',
+        exp: Math.floor(Date.now() / 1000) + 300
+    })).toString('base64url');
+    const jwt = `header.${jwtPayload}.signature`;
+    const jwtProvider = {
+        validateToken: async token => {
+            if (token === 'invalid-token') {
+                const error = new Error('invalid token');
+                error.response = { status: 401 };
+                throw error;
+            }
+            assert.strictEqual(token, jwt);
+            return true;
+        }
+    };
+    const jwtServer = await adminweb.create({
+        port: 0,
+        useTapisJwt: true,
+        tapisProvider: jwtProvider,
+        allowedTenants: ['portals'],
+        allowedUsers: ['operator']
+    });
+    const jwtPort = jwtServer.address().port;
+    const jwtAuth = `Bearer ${jwt}`;
+
+    try {
+        const shell = await request(jwtPort, '/');
+        assert.strictEqual(shell.status, 200);
+        assert.ok(!shell.headers['www-authenticate']);
+
+        const protectedWithoutToken = await request(jwtPort, '/r/info');
+        assert.strictEqual(protectedWithoutToken.status, 401);
+
+        const missingLoginToken = await request(jwtPort, '/r/auth/validate', { method: 'POST' });
+        assert.strictEqual(missingLoginToken.status, 401);
+
+        const login = await request(jwtPort, '/r/auth/validate', {
+            method: 'POST',
+            headers: { authorization: jwtAuth }
+        });
+        assert.strictEqual(login.status, 200);
+        assert.ok(!login.body.includes(jwt));
+
+        const authenticated = await request(jwtPort, '/r/info', {
+            headers: { authorization: jwtAuth }
+        });
+        assert.strictEqual(authenticated.status, 200);
+
+        const invalid = await request(jwtPort, '/r/auth/validate', {
+            method: 'POST',
+            headers: { authorization: 'Bearer invalid-token' }
+        });
+        assert.strictEqual(invalid.status, 401);
+    } finally {
+        await new Promise(resolve => jwtServer.close(resolve));
+    }
+
     const unconfigured = await adminweb.create({port: 0});
     try {
         const shell = await request(unconfigured.address().port, '/');

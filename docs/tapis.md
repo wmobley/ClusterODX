@@ -88,9 +88,16 @@ The token is never written to the ASR configuration or log messages.
 Worker registration requires either the request-scoped Tapis bearer token or a
 configured shared secret. Set the latter with `registration-secret` in the
 ClusterODX configuration, or with `worker.registrationSecret` in the Tapis ASR
-configuration. UUIDs and owner fields are metadata, not authentication. The
-admin web interface also requires `admin-pass`; passwordless administrative
-access is disabled, and state-changing cross-origin requests are rejected.
+configuration. UUIDs and owner fields are metadata, not authentication.
+
+The administrative web interface uses Tapis JWT authentication by default
+(`admin-web-use-tapis-jwt: true`). It presents a token field, validates the
+submitted bearer token through the Tapis provider, and keeps the token only in
+browser memory. Optional `admin-web-allowed-tenants` and
+`admin-web-allowed-users` configuration values restrict the accepted Tapis
+identities. The administrative CLI remains protected by `admin-pass`. Set
+`admin-web-use-tapis-jwt: false` to use that password for the web interface as
+well. State-changing cross-origin requests are rejected.
 
 ## Handoff observability
 
