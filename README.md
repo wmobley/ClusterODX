@@ -20,6 +20,11 @@ npm install
 
 There's also a docker image available at `webodm/clusterodx` and a native [Windows bundle](#windows-bundle).
 
+The TACC/NodeODX Tapis reconciliation is documented in [docs/tapis.md](docs/tapis.md).
+The Tapis provider includes the NodeODX worker-registration and pending-task
+handoff boundary; see the documentation for the required application callback
+configuration and end-to-end validation limits.
+
 ## Usage
 
 First, start the program:

@@ -4,6 +4,10 @@
     "admin-cli-port": 8080,
     "admin-web-port": 10000,
     "admin-pass": "",
+    "admin-session-secret": "change-me",
+    "admin-web-use-tapis-jwt": true,
+    "admin-web-allowed-tenants": "",
+    "admin-web-allowed-users": "",
     "cloud-provider": "local",
     "downloads-from-s3": "",
     "splitmerge": true,
@@ -16,5 +20,19 @@
     "stale-uploads-timeout": 0,
     "ssl-key": "",
     "ssl-cert": "",
-    "asr": ""
+    "asr": "",
+    "tmp-dir": "tmp",
+    "allow-local-download-bypass": false,
+    "force-node-downloads": false,
+    "webodm": {
+        "baseUrl": "http://localhost:8000",
+        "requireStaff": true,
+        "timeoutMs": 10000
+    },
+    "tapis_debug": false,
+    "node_shared_path_mappings": {
+        "*": {
+            "/corral/webodm/media": "/corral/utexas/BCS26030/webodm/media"
+        }
+    }
 }

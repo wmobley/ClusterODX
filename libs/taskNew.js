@@ -107,6 +107,7 @@ module.exports = {
             dateCreated: null,
             error: null,
             webhook: "",
+            pathImport: null,
             fileNames: [],
             imagesCount: 0
         };
@@ -140,6 +141,10 @@ module.exports = {
 
                 else if (fieldname === 'webhook' && val){
                     params.webhook = val;
+                }
+
+                else if (fieldname === 'import_path' && val){
+                    params.pathImport = val;
                 }
             });
         }
@@ -290,9 +295,9 @@ module.exports = {
 
     process: async function(req, res, cloudProvider, uuid, params, token, limits, getLimitedOptions){
         const tmpPath = path.join("tmp", uuid);
-        const { options, taskName, skipPostProcessing, outputs, dateCreated, fileNames, imagesCount, webhook } = params;
+        const { options, taskName, skipPostProcessing, outputs, dateCreated, fileNames, imagesCount, webhook, pathImport } = params;
 
-        if (fileNames.length < 1){
+        if (fileNames.length < 1 && !pathImport){
             throw new Error(`Not enough images (${fileNames.length} files uploaded)`);
         }
 
@@ -309,13 +314,15 @@ module.exports = {
         let node = await nodes.findBestAvailableNode(imagesCount, true);
         
         // Do we need to / can we create a new node via autoscaling?
+        const provider = asrProvider.get();
+        const tapisAutoscale = provider && provider.getDriverName && provider.getDriverName() === 'tapis';
         const autoscale = (!node || node.availableSlots() === 0) && 
                             asrProvider.isAllowedToCreateNewNodes() &&
-                            asrProvider.canHandle(fileNames.length);
+                            asrProvider.canHandle(fileNames.length || imagesCount);
 
         if (autoscale) node = nodes.referenceNode(); // Use the reference node for task options purposes
 
-        if (node){
+        if (node || (autoscale && tapisAutoscale)){
             // Validate options
             // Will throw an exception on failure
             let taskOptions = odmOptions.filterOptions(this.augmentTaskOptions(req, options, limits, token), 
@@ -569,9 +576,13 @@ module.exports = {
                 const asr = asrProvider.get();
                 try{
                     dmHostname = asr.generateHostname(imagesCount);
-                    node = await asr.createNode(req, imagesCount, token, dmHostname, status);
-                    if (!status.aborted) nodes.add(node);
-                    else return;
+                    node = await asr.createNode(req, imagesCount, token, dmHostname, status,
+                                                taskOptions, fileNames, tmpPath, uuid, pathImport);
+                    // Tapis workers register asynchronously. The registration webhook will
+                    // upload/submit the pending task and add the route when the worker is ready.
+                    if (status.aborted) return;
+                    if (node) nodes.add(node);
+                    if (!node && tapisAutoscale) return;
                 }catch(e){
                     const err = new Error("No nodes available (attempted to autoscale but failed). Try again later.");
                     logger.warn(`Cannot create node via autoscaling: ${e.message}`);

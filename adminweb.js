@@ -23,6 +23,14 @@ const package_info = require("./package_info");
 const cors = require("cors");
 const netutils = require("./libs/netutils");
 const asrProvider = require("./libs/asrProvider");
+const config = require("./config");
+const tasktable = require("./libs/tasktable");
+const routetable = require("./libs/routetable");
+const utils = require("./libs/utils");
+const { extractBearerToken, normalizeRegistration } = require("./libs/tapisRegistration");
+const { submitPendingTask } = require("./libs/tapisWorker");
+const { classifySubmitError, logHandoffEvent, safeNodeEndpoint } = require("./libs/observability");
+const crypto = require("crypto");
 
 module.exports = {
   create: function (options) {
@@ -31,6 +39,166 @@ module.exports = {
     const app = express();
     app.use(express.json());
     app.use(cors());
+
+    // Tapis workers cannot use the admin Basic Auth credentials. This endpoint
+    // is therefore authenticated with the request-scoped Tapis token (or an
+    // explicitly configured registration secret) and is registered before the
+    // admin-only middleware below.
+    app.post("/webhook/register-node", async (req, res) => {
+      logHandoffEvent(logger, "webhook_received");
+      let registration;
+      try {
+        registration = normalizeRegistration(req.body);
+      } catch (error) {
+        logHandoffEvent(logger, "webhook_rejected", { outcome: "rejected", error_class: "validation_error" });
+        return res.status(400).json({ error: error.message });
+      }
+
+      const registrationFields = () => ({
+        node: safeNodeEndpoint(registration.hostname, registration.port),
+        tapis_job_id: registration.tapisJobUuid,
+        task_id: registration.registrationUuid
+      });
+
+      const provider = asrProvider.get();
+      if (!provider || typeof provider.getDriverName !== "function" || provider.getDriverName() !== "tapis") {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          outcome: "rejected",
+          error_class: "not_enabled"
+        }));
+        return res.status(404).json({ error: "Tapis worker registration is not enabled" });
+      }
+
+      const bearerToken = extractBearerToken(req.headers);
+      const effectiveTapisToken = bearerToken || registration.tapisToken;
+      let authenticated = false;
+      let authMethod = null;
+
+      if (effectiveTapisToken) {
+        try {
+          await provider.validateToken(effectiveTapisToken);
+          authenticated = true;
+          authMethod = "tapis-jwt";
+        } catch (error) {
+          logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+            outcome: "rejected",
+            error_class: "auth_error"
+          }));
+          return res.status(401).json({ error: "Tapis token validation failed" });
+        }
+      } else {
+        const configuredSecret = config.registration_secret ||
+          (typeof provider.getConfig === "function" ? provider.getConfig('worker.registrationSecret', '') : '');
+        if (!configuredSecret || !registration.registrationSecret) {
+          logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+            outcome: "rejected",
+            error_class: "auth_error"
+          }));
+          return res.status(401).json({ error: "Tapis token or registration secret required" });
+        }
+        const expected = Buffer.from(String(configuredSecret));
+        const supplied = Buffer.from(registration.registrationSecret);
+        if (expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied)) {
+          authenticated = true;
+          authMethod = "registration-secret";
+        }
+      }
+
+      if (!authenticated) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          outcome: "rejected",
+          error_class: "auth_error"
+        }));
+        return res.status(401).json({ error: "Tapis token or registration secret required" });
+      }
+
+      const pending = provider.findPendingTask(registration.tapisJobUuid) ||
+                      provider.findPendingTask(registration.registrationUuid);
+      if (!pending) {
+        const existingNode = registration.tapisJobUuid && nodes.find(node =>
+          node.getTapisJobId && node.getTapisJobId() === registration.tapisJobUuid);
+        const existingRoute = registration.registrationUuid && await routetable.lookup(registration.registrationUuid);
+        if (existingNode || existingRoute) {
+          return res.json({
+            success: true,
+            message: "Tapis worker registration already completed",
+            nodeId: existingNode ? nodes.all().indexOf(existingNode) + 1 : null,
+            tapisJobUuid: registration.tapisJobUuid || null,
+            taskUuid: registration.registrationUuid || null,
+            authMethod
+          });
+        }
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          outcome: "rejected",
+          error_class: "not_found"
+        }));
+        return res.status(404).json({ error: "No pending Tapis task matches this registration" });
+      }
+
+      // A valid Tapis token alone must not be able to claim another user's
+      // pending job. The worker token is expected to be the same request token
+      // that created the Tapis submission.
+      if (effectiveTapisToken && pending.token && effectiveTapisToken !== pending.token) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          outcome: "rejected",
+          error_class: "auth_error"
+        }));
+        return res.status(403).json({ error: "Tapis token does not own the pending task" });
+      }
+
+      let node = nodes.find(existing => existing.hostname() === registration.hostname && existing.port() === registration.port);
+      if (!node) node = nodes.addUnique(registration.hostname, registration.port, registration.nodeToken);
+      if (!node) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          outcome: "rejected",
+          error_class: "validation_error"
+        }));
+        return res.status(409).json({ error: "Node already exists or registration is invalid" });
+      }
+
+      node.setTapisJob(pending.tapisJobId);
+      Object.assign(node.nodeData, pending.registrationMeta || {}, registration.metadata, {
+        nodeReady: registration.nodeReady
+      });
+      await nodes.saveToDisk();
+
+      try {
+        await submitPendingTask(pending, node);
+        await routetable.add(pending.taskId, node, pending.token);
+        await tasktable.delete(pending.taskId);
+        provider.consumePendingTask(registration.tapisJobUuid || registration.registrationUuid);
+        if (pending.tmpPath) utils.rmdir(pending.tmpPath);
+
+        logHandoffEvent(logger, "webhook_completed", {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          node: safeNodeEndpoint(registration.hostname, registration.port),
+          outcome: "success"
+        });
+        logger.info(`Registered Tapis worker ${registration.hostname}:${registration.port} and routed task ${pending.taskId}`);
+        return res.json({
+          success: true,
+          message: "Tapis worker registered and task submitted",
+          nodeId: nodes.all().indexOf(node) + 1,
+          tapisJobUuid: pending.tapisJobId,
+          taskUuid: pending.taskId,
+          authMethod
+        });
+      } catch (error) {
+        logHandoffEvent(logger, "webhook_failed", {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          node: safeNodeEndpoint(registration.hostname, registration.port),
+          outcome: "failure",
+          error_class: classifySubmitError(error, "handoff_error")
+        });
+        return res.status(502).json({ error: "Worker registered, but task submission failed; retry registration" });
+      }
+    });
 
     app.get("/signout", (req, res) => {
       res.status(401).send('Signed out. <br /> <a href="/">Sign back in</a>');

@@ -37,7 +37,7 @@ module.exports = {
             if (provider){
                 asrProvider = new (require('./asr-providers/' + provider + '.js'))(userConfig);
                 await asrProvider.initialize();
-                await DockerMachine.checkInstalled();
+                if (provider !== 'tapis') await DockerMachine.checkInstalled();
             }else{
                 throw new Error("Your ASR configuration must specify a provider key (we didn't find it).");
             }
@@ -106,6 +106,14 @@ module.exports = {
                 };
 
                 logger.debug(`ASR cleanup (in ${delay / 1000} seconds)`);
+                if (delay) setTimeout(run, delay);
+                else run();
+            }else if (!node && typeof asrProvider.cancelPendingTask === 'function' && asrProvider.findPendingTask(taskId)){
+                const run = () => asrProvider.cancelPendingTask(taskId).catch(error => {
+                    logger.warn(`ASR pending-task cleanup failed: ${error.message}`);
+                });
+
+                logger.debug(`ASR pending-task cleanup (in ${delay / 1000} seconds)`);
                 if (delay) setTimeout(run, delay);
                 else run();
             }

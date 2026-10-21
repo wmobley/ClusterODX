@@ -85,7 +85,14 @@ module.exports = {
             const cacheValue = optionsCache.get(token);
             if (cacheValue) return cacheValue;
 
-            const options = await node.getOptions();
+            const provider = asrProvider.get();
+            let options;
+            if (!node && provider && typeof provider.getNodeOptions === 'function'){
+                options = provider.getNodeOptions(token);
+            }else{
+                if (!node) throw new Error('No reference node available to provide processing options.');
+                options = await node.getOptions();
+            }
             const limitedOptions = odmOptions.optionsWithLimits(options, limits.options);
             return optionsCache.set(token, limitedOptions);
         };
@@ -155,8 +162,10 @@ module.exports = {
             '/options': async function(req, res, user){
                 const { token, limits } = user;
                 const node = nodes.referenceNode();
-                if (!node) json(res, {'error': 'Cannot compute /options, no nodes are online.'});
-                else{
+                const provider = asrProvider.get();
+                if (!node && !(provider && typeof provider.getNodeOptions === 'function')) {
+                    json(res, {'error': 'Cannot compute /options, no nodes are online.'});
+                }else{
                     const options = await getLimitedOptions(token, limits, node);
                     json(res, options);
                 }
@@ -287,7 +296,9 @@ module.exports = {
                         }
 
                         const referenceNode = nodes.referenceNode();
-                        if (!referenceNode){
+                        const provider = asrProvider.get();
+                        const hasProviderOptions = provider && typeof provider.getNodeOptions === 'function';
+                        if (!referenceNode && !hasProviderOptions){
                             die("Cannot create task, no nodes are online.");
                             return;
                         }

@@ -122,7 +122,7 @@ module.exports = class Node{
     }
 
     isAutoSpawned(){
-        return !!this.getDockerMachineName();
+        return !!this.getDockerMachineName() || !!this.getTapisJobId();
     }
 
     isLocked(){
@@ -159,6 +159,14 @@ module.exports = class Node{
     
     getDockerMachineMaxUploadTime(){
         return (this.nodeData.dockerMachine || {}).maxUploadTime;
+    }
+
+    setTapisJob(jobId){
+        this.nodeData.tapisJobId = jobId;
+    }
+
+    getTapisJobId(){
+        return this.nodeData.tapisJobId;
     }
 
     availableSlots(){

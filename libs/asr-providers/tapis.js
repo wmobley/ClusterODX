@@ -1,0 +1,234 @@
+'use strict';
+
+const axios = require('axios');
+const AbstractASRProvider = require('../classes/AbstractASRProvider');
+const tapisTaskOptions = require('../tapisTaskOptions');
+
+const ACTIVE_STATUSES = new Set([
+    'PENDING', 'PROCESSING_INPUTS', 'STAGING_INPUTS', 'STAGING_JOB',
+    'SUBMITTING', 'SUBMITTING_JOB', 'QUEUED', 'RUNNING', 'ARCHIVING',
+    'CLEANING_UP', 'PAUSED', 'BLOCKED'
+]);
+
+const parseMinutes = (value, fallback = 60) => {
+    if (typeof value === 'string' && value.includes(':')) {
+        const [hours = 0, minutes = 0, seconds = 0] = value.split(':').map(Number);
+        value = (hours * 60) + minutes + Math.ceil(seconds / 60);
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.min(2880, parsed)) : fallback;
+};
+
+module.exports = class TapisAsrProvider extends AbstractASRProvider {
+    constructor(userConfig) {
+        super({
+            tapis: { baseUrl: 'https://tacc.tapis.io', tenantId: 'tacc' },
+            app: { appId: 'nodeodx-app', appVersion: '1.0' },
+            system: { executionSystemId: 'CHANGEME!', archiveSystemId: 'CHANGEME!', logicalQueue: 'vm-small' },
+            scheduler: { defaultAllocation: '' },
+            job: { maxJobTime: '01:00:00', nodeCount: 1, coresPerNode: 1, memoryMB: 4096, archiveOnAppError: true, maxNodesPerJob: 1, appArgs: [], envVariables: [] },
+            worker: { registrationSecret: '' },
+            maxRuntime: -1,
+            maxUploadTime: 3600,
+            jobLimit: -1,
+            createRetries: 3,
+            imageSizeMapping: []
+        }, userConfig);
+        this.activeJobs = new Map();
+        this.pendingTasks = new Map();
+    }
+
+    async initialize() {
+        this.validateConfigKeys([
+            'tapis.baseUrl', 'tapis.tenantId', 'app.appId', 'app.appVersion',
+            'system.executionSystemId', 'system.archiveSystemId'
+        ]);
+        const mappings = this.getConfig('imageSizeMapping', []);
+        if (!Array.isArray(mappings)) throw new Error('Invalid config key imageSizeMapping (array expected)');
+        mappings.sort((a, b) => Number(a.maxImages || 0) - Number(b.maxImages || 0));
+    }
+
+    getDriverName() { return 'tapis'; }
+    getCreateRetries() { return Number(this.getConfig('createRetries', 3)) || 3; }
+    getMaxRuntime() { return Number(this.getConfig('maxRuntime', -1)); }
+    getMaxUploadTime() { return Number(this.getConfig('maxUploadTime', -1)); }
+    getMachinesLimit() { return Number(this.getConfig('jobLimit', -1)); }
+    getNodesPendingCreation() { return new Set(this.pendingTasks.values()).size; }
+    getDownloadsBaseUrl() { return `${this.getConfig('tapis.baseUrl')}/v3/files`; }
+
+    getJobPropertiesFor(imagesCount) {
+        return (this.getConfig('imageSizeMapping', []) || []).find(mapping => Number(mapping.maxImages) >= imagesCount) || null;
+    }
+
+    canHandle(imagesCount) { return this.getJobPropertiesFor(imagesCount) !== null; }
+
+    getDefaultQueue(imagesCount = null) {
+        const mapping = imagesCount === null ? null : this.getJobPropertiesFor(imagesCount);
+        return (mapping && mapping.logicalQueue) || this.getConfig('system.logicalQueue', 'vm-small');
+    }
+
+    getDefaultNodeCount(imagesCount = null) {
+        const mapping = imagesCount === null ? null : this.getJobPropertiesFor(imagesCount);
+        const configured = mapping && (mapping.computeNodeCount || mapping.nodeCount) || this.getConfig('job.nodeCount', 1);
+        const maximum = Number(this.getConfig('job.maxNodesPerJob', 1)) || 1;
+        return Math.max(1, Math.min(maximum, Number(configured) || 1));
+    }
+
+    getClusterOptions() {
+        const queues = this.getConfig('system.queueFilter', [this.getDefaultQueue()]);
+        const queueDomain = Array.isArray(queues) ? queues : String(queues).split(',').map(value => value.trim()).filter(Boolean);
+        return [
+            { name: 'tapis-queue', label: 'Queue', type: 'enum', value: this.getDefaultQueue(), domain: queueDomain },
+            { name: 'tapis-allocation', label: 'Allocation', type: 'string', value: this.getConfig('scheduler.defaultAllocation', ''), domain: '' },
+            { name: 'tapis-max-run-time', label: 'Max Run Time', type: 'int', value: `${parseMinutes(this.getConfig('job.maxJobTime', '01:00:00'))}`, domain: 'integer: 1 <= x <= 2880' },
+            { name: 'tapis-node', label: 'Number of Nodes', type: 'int', value: `${this.getDefaultNodeCount()}`, domain: `integer: 1 <= x <= ${Number(this.getConfig('job.maxNodesPerJob', 1)) || 1}` }
+        ];
+    }
+
+    getNodeOptions() {
+        const nodeOptions = this.getConfig('nodeOptions', []);
+        if (!Array.isArray(nodeOptions)) throw new Error('Invalid config key nodeOptions (array expected)');
+        return nodeOptions.concat(this.getClusterOptions());
+    }
+
+    createApiClient(token) {
+        if (!token || typeof token !== 'string') throw new Error('Tapis token is required');
+        return axios.create({
+            baseURL: this.getConfig('tapis.baseUrl'),
+            headers: { 'X-Tapis-Token': token }
+        });
+    }
+
+    async validateToken(token) {
+        await this.createApiClient(token).get('/v3/systems');
+        return true;
+    }
+
+    async getJobStatus(token, tapisJobId) {
+        const response = await this.createApiClient(token).get(`/v3/jobs/${encodeURIComponent(tapisJobId)}`);
+        const result = response && response.data && response.data.result;
+        return typeof result === 'string' ? result : (result && result.status) || 'UNKNOWN';
+    }
+
+    async cancelJob(token, tapisJobId) {
+        await this.createApiClient(token).put(`/v3/jobs/${encodeURIComponent(tapisJobId)}`, { operation: 'stop' });
+        return true;
+    }
+
+    calculateNodeSubmissionPlan(imagesCount, taskOptions = []) {
+        const mapping = this.getJobPropertiesFor(imagesCount) || {};
+        const requested = Number(tapisTaskOptions.getTaskOption(taskOptions, 'tapis-node')) ||
+            Number(mapping.computeNodeCount || mapping.nodeCount || this.getConfig('job.nodeCount', 1)) || 1;
+        const maximum = Number(this.getConfig('job.maxNodesPerJob', 1)) || 1;
+        return {
+            jobProps: mapping,
+            nodesForJob: Math.max(1, Math.min(maximum, requested)),
+            requestedNodeCount: requested,
+            maxNodesPerJob: maximum,
+            jobsToSubmit: Math.max(1, Number(mapping.tapisJobCount || mapping.jobCount || 1)),
+            nodesToSubmit: Math.max(1, Number(mapping.jobCount || 1))
+        };
+    }
+
+    async submitJobWithoutData(token, jobId, imagesCount, taskOptions = []) {
+        const plan = this.calculateNodeSubmissionPlan(imagesCount, taskOptions);
+        const mapping = plan.jobProps || {};
+        const queue = tapisTaskOptions.getTaskOption(taskOptions, 'tapis-queue') || this.getDefaultQueue(imagesCount);
+        const allocation = tapisTaskOptions.getTaskOption(taskOptions, 'tapis-allocation') || this.getConfig('scheduler.defaultAllocation', '');
+        const maxMinutes = parseMinutes(tapisTaskOptions.getTaskOption(taskOptions, 'tapis-max-run-time') || mapping.maxJobTime || this.getConfig('job.maxJobTime', '01:00:00'));
+        const job = {
+            name: String(jobId),
+            appId: this.getConfig('app.appId'),
+            appVersion: this.getConfig('app.appVersion'),
+            execSystemId: this.getConfig('system.executionSystemId'),
+            execSystemLogicalQueue: queue,
+            archiveSystemId: this.getConfig('system.archiveSystemId'),
+            nodeCount: plan.nodesForJob,
+            coresPerNode: Number(mapping.coresPerNode || this.getConfig('job.coresPerNode', 1)),
+            memoryMB: Number(mapping.memoryMB || this.getConfig('job.memoryMB', 4096)),
+            maxMinutes,
+            archiveOnAppError: this.getConfig('job.archiveOnAppError', true),
+            parameterSet: {
+                appArgs: this.getConfig('job.appArgs', []),
+                envVariables: this.getConfig('job.envVariables', []),
+                schedulerOptions: allocation ? [{ arg: `-A ${allocation}`, name: 'TACC Allocation' }] : []
+            },
+            subscriptions: []
+        };
+        const response = await this.createApiClient(token).post('/v3/jobs/submit', job);
+        const uuid = response && response.data && response.data.result && response.data.result.uuid;
+        if (!uuid) throw new Error('Tapis response did not include a job UUID');
+        this.activeJobs.set(uuid, { jobId, imagesCount, status: 'SUBMITTING', token });
+        return { primaryJobId: uuid, submittedJobs: [{ tapisJobId: uuid, jobName: job.name }] };
+    }
+
+    async createNode(req, imagesCount, token, hostname, status, taskOptions = [], fileNames = [], tmpPath = null, clusterTaskId = null, pathImport = null) {
+        if (!token) throw new Error('Tapis token is required for Tapis-backed task creation');
+        if (!this.canHandle(imagesCount)) throw new Error(`Cannot handle ${imagesCount} images.`);
+
+        await this.validateToken(token);
+        const submission = await this.submitJobWithoutData(token, hostname, imagesCount, taskOptions);
+        if (status && status.aborted) {
+            await this.cancelJob(token, submission.primaryJobId);
+            this.activeJobs.delete(submission.primaryJobId);
+            throw new Error('Aborted');
+        }
+        const pending = {
+            taskId: clusterTaskId || hostname,
+            jobId: hostname,
+            tapisJobId: submission.primaryJobId,
+            imagesCount,
+            taskOptions: tapisTaskOptions.stripTapisOptions(taskOptions),
+            fileNames,
+            tmpPath,
+            pathImport,
+            token,
+            submittedJobs: submission.submittedJobs
+        };
+        this.pendingTasks.set(hostname, pending);
+        this.pendingTasks.set(submission.primaryJobId, pending);
+        this.pendingTasks.set(pending.taskId, pending);
+        return null;
+    }
+
+    findPendingTask(identifier) {
+        if (!identifier) return null;
+        return this.pendingTasks.get(identifier) || null;
+    }
+
+    consumePendingTask(identifier) {
+        const pending = this.findPendingTask(identifier);
+        if (!pending) return null;
+        for (const [key, value] of this.pendingTasks.entries()) {
+            if (value === pending) this.pendingTasks.delete(key);
+        }
+        return pending;
+    }
+
+    async cancelPendingTask(identifier) {
+        const pending = this.findPendingTask(identifier);
+        if (!pending) return false;
+        await this.cancelJob(pending.token, pending.tapisJobId);
+        this.consumePendingTask(identifier);
+        this.activeJobs.delete(pending.tapisJobId);
+        return true;
+    }
+
+    async destroyMachine(identifier) {
+        return this.cancelPendingTask(identifier);
+    }
+
+    async destroyNode(node) {
+        if (!node || !node.getTapisJobId) return false;
+        const tapisJobId = node.getTapisJobId();
+        const active = this.activeJobs.get(tapisJobId);
+        if (!active || !active.token) {
+            return false;
+        }
+        await this.cancelJob(active.token, tapisJobId);
+        this.activeJobs.delete(tapisJobId);
+        return true;
+    }
+
+    getActiveJobStatuses() { return new Set(ACTIVE_STATUSES); }
+};

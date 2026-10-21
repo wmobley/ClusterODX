@@ -35,9 +35,11 @@ let argDefs = {
     string: ['port', 'admin-cli-port', 'admin-pass', 'admin-web-port',
             'cloud-provider', 'downloads-from-s3', 'token', 'log-level',
             'upload-max-speed', 'ssl-key', 'ssl-cert', 'secure-port',
-            'public-address', 'config',
-            'asr'],
-    boolean: ['splitmerge', 'debug'],
+            'public-address', 'config', 'admin-session-secret',
+            'asr', 'registration-secret', 'webodm-base-url',
+            'admin-web-allowed-tenants', 'admin-web-allowed-users', 'tmp-dir'],
+    boolean: ['splitmerge', 'debug', 'allow-local-download-bypass',
+              'force-node-downloads', 'webodm-require-staff', 'admin-web-use-tapis-jwt'],
     alias: {
         p: 'port',
         c: 'cloud-provider'
@@ -45,7 +47,8 @@ let argDefs = {
     default: defaultConfig,
 
     int: ['port', 'admin-cli-port', 'admin-web-port', 
-          'secure-port', 'upload-max-speed', 'flood-limit', 'stale-uploads-timeout'] // for cast only, not used by minimist
+          'secure-port', 'upload-max-speed', 'flood-limit', 'stale-uploads-timeout',
+          'webodm-timeout-ms'] // for cast only, not used by minimist
 };
 let argv = require('minimist')(process.argv.slice(2), argDefs);
 
@@ -91,10 +94,20 @@ if (argv.config !== defaultConfigFilePath){
     }
 }
 
+const castValue = (value, cast) => {
+    if (value === undefined) return undefined;
+    if (cast === String) {
+        if (typeof value === 'string' || value === null) return value === null ? '' : value;
+        // Preserve structured settings such as node_shared_path_mappings.
+        return value;
+    }
+    return cast(value);
+};
+
 function readConfig(key, cast = String){
-    if (userConfig[key] !== undefined) return cast(userConfig[key]);
-    else if (argv[key] !== undefined) return cast(argv[key]);
-    else return '';
+    if (userConfig[key] !== undefined) return castValue(userConfig[key], cast);
+    if (argv[key] !== undefined) return castValue(argv[key], cast);
+    return '';
 }
 
 let config = {};
@@ -118,6 +131,37 @@ for (let k in argv){
     if (argDefs.boolean.indexOf(k) !== -1) cast = Boolean;
     config[ck] = readConfig(k, cast);
 }
+
+const mergeWebodmConfig = () => {
+    const defaults = defaultConfig.webodm || {};
+    const overrides = userConfig.webodm || {};
+    const merged = Object.assign({}, defaults, overrides);
+    if (process.argv.includes('--webodm-base-url') && argv['webodm-base-url']) {
+        merged.baseUrl = argv['webodm-base-url'];
+    }
+    if (process.argv.includes('--webodm-require-staff') || process.argv.includes('--no-webodm-require-staff')){
+        merged.requireStaff = Boolean(argv['webodm-require-staff']);
+    }
+    if (process.argv.includes('--webodm-timeout-ms') && argv['webodm-timeout-ms']){
+        merged.timeoutMs = parseInt(argv['webodm-timeout-ms'], 10);
+    }
+    return merged;
+};
+
+config.webodm = mergeWebodmConfig();
+
+if (!config.tmp_dir || config.tmp_dir.length === 0) config.tmp_dir = 'tmp';
+
+const parseList = (value) => {
+    if (!value) return [];
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (typeof value === 'string') return value.split(',').map(entry => entry.trim()).filter(Boolean);
+    return [];
+};
+
+config.admin_web_allowed_tenants = parseList(config.admin_web_allowed_tenants);
+config.admin_web_allowed_users = parseList(config.admin_web_allowed_users);
+config.admin_web_use_tapis_jwt = Boolean(config.admin_web_use_tapis_jwt);
 
 config.use_ssl = config.ssl_key && config.ssl_cert;
 if (config.debug) config.logger.level = 'debug';

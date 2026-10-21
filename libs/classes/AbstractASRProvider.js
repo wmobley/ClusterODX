@@ -30,12 +30,16 @@ module.exports = class AbstractASRProvider{
 
         if (userConfigFile){
             try{
-                const userConfig = JSON.parse(fs.readFileSync(userConfigFile).toString());
+                const userConfig = typeof userConfigFile === "string" ?
+                    JSON.parse(fs.readFileSync(userConfigFile).toString()) : userConfigFile;
+                if (!userConfig || typeof userConfig !== "object" || Array.isArray(userConfig)){
+                    throw new Error("configuration object expected");
+                }
                 for (let k in userConfig){
                     this.config[k] = userConfig[k];
                 }
             }catch(e){
-                throw new Error(`Invalid configuration file ${userConfigFile}`);
+                throw new Error(`Invalid configuration ${typeof userConfigFile === "string" ? `file ${userConfigFile}` : "object"}`);
             }
         }
 
