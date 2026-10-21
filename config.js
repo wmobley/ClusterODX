@@ -105,6 +105,11 @@ const castValue = (value, cast) => {
 };
 
 function readConfig(key, cast = String){
+    // Keep the admin password out of command lines and configuration files
+    // when desired. The restart helper passes this through the environment.
+    if (key === 'admin-pass' && process.env.CLUSTERODX_ADMIN_PASS){
+        return castValue(process.env.CLUSTERODX_ADMIN_PASS, cast);
+    }
     if (userConfig[key] !== undefined) return castValue(userConfig[key], cast);
     if (argv[key] !== undefined) return castValue(argv[key], cast);
     return '';

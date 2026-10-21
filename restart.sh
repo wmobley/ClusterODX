@@ -24,6 +24,16 @@ if [[ ! -f "${NODE_CONFIG}" ]]; then
     exit 1
 fi
 
+if [[ -z "${CLUSTERODX_ADMIN_PASS:-}" ]] && ! node -e '
+const fs = require("fs");
+const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+process.exit(typeof config["admin-pass"] === "string" && config["admin-pass"].length > 0 ? 0 : 1);
+' "${NODE_CONFIG}"; then
+    echo "ClusterODX admin authentication is not configured."
+    echo "Set CLUSTERODX_ADMIN_PASS before restarting, or set admin-pass in ${NODE_CONFIG}."
+    exit 1
+fi
+
 if command -v 7z >/dev/null 2>&1; then
     echo "7zip detected: $(command -v 7z)"
 else

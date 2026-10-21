@@ -39,6 +39,13 @@ configured, the CLI is disabled and the web administrative APIs return a
 configuration error instead of running without authentication. Set
 `--admin-cli-port 0` or `--admin-web-port 0` to disable either interface.
 
+When using `restart.sh`, keep the password out of the process command line by
+passing it through the environment:
+
+```bash
+CLUSTERODX_ADMIN_PASS='choose-a-strong-password' ./restart.sh
+```
+
 Or with docker:
 
 ```bash
