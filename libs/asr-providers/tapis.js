@@ -3,6 +3,57 @@
 const axios = require('axios');
 const AbstractASRProvider = require('../classes/AbstractASRProvider');
 const tapisTaskOptions = require('../tapisTaskOptions');
+const logger = require('../logger');
+
+const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|credential|api.?key)/i;
+const MAX_LOG_VALUE_LENGTH = 2000;
+
+const sanitizeForLog = (value, depth = 0) => {
+    if (value === null || value === undefined) return value;
+    if (depth > 4) return '[truncated]';
+    if (typeof value === 'string') {
+        return value.length > MAX_LOG_VALUE_LENGTH ? `${value.slice(0, MAX_LOG_VALUE_LENGTH)}…` : value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') return value;
+    if (Array.isArray(value)) return value.slice(0, 20).map(item => sanitizeForLog(item, depth + 1));
+    if (typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).slice(0, 50).map(([key, item]) => [
+            key,
+            SENSITIVE_KEY_PATTERN.test(key) ? '[redacted]' : sanitizeForLog(item, depth + 1)
+        ]));
+    }
+    return String(value);
+};
+
+const summarizeJob = job => ({
+    appId: job.appId,
+    appVersion: job.appVersion,
+    execSystemId: job.execSystemId,
+    execSystemLogicalQueue: job.execSystemLogicalQueue,
+    archiveSystemId: job.archiveSystemId,
+    nodeCount: job.nodeCount,
+    coresPerNode: job.coresPerNode,
+    memoryMB: job.memoryMB,
+    maxMinutes: job.maxMinutes,
+    archiveOnAppError: job.archiveOnAppError,
+    appArgsCount: job.parameterSet && Array.isArray(job.parameterSet.appArgs) ? job.parameterSet.appArgs.length : 0,
+    envVariablesCount: job.parameterSet && Array.isArray(job.parameterSet.envVariables) ? job.parameterSet.envVariables.length : 0,
+    schedulerOptions: job.parameterSet && Array.isArray(job.parameterSet.schedulerOptions)
+        ? job.parameterSet.schedulerOptions.map(option => ({ name: option.name, hasArg: Boolean(option.arg) }))
+        : []
+});
+
+const logTapisRequestFailure = (operation, error, details = {}) => {
+    const response = error && error.response;
+    logger.warn(`[TAPIS] ${operation} failed: ${JSON.stringify({
+        operation,
+        status: response && response.status,
+        code: error && error.code,
+        message: error && error.message,
+        response: response ? sanitizeForLog(response.data) : undefined,
+        ...details
+    })}`);
+};
 
 const ACTIVE_STATUSES = new Set([
     'PENDING', 'PROCESSING_INPUTS', 'STAGING_INPUTS', 'STAGING_JOB',
@@ -100,7 +151,14 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     }
 
     async validateToken(token) {
-        await this.createApiClient(token).get('/v3/systems');
+        try {
+            await this.createApiClient(token).get('/v3/systems');
+        } catch (error) {
+            logTapisRequestFailure('validate token', error, {
+                baseUrl: this.getConfig('tapis.baseUrl')
+            });
+            throw error;
+        }
         return true;
     }
 
@@ -155,7 +213,16 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             },
             subscriptions: []
         };
-        const response = await this.createApiClient(token).post('/v3/jobs/submit', job);
+        let response;
+        try {
+            response = await this.createApiClient(token).post('/v3/jobs/submit', job);
+        } catch (error) {
+            logTapisRequestFailure('submit job', error, {
+                baseUrl: this.getConfig('tapis.baseUrl'),
+                job: summarizeJob(job)
+            });
+            throw error;
+        }
         const uuid = response && response.data && response.data.result && response.data.result.uuid;
         if (!uuid) throw new Error('Tapis response did not include a job UUID');
         this.activeJobs.set(uuid, { jobId, imagesCount, status: 'SUBMITTING', token });

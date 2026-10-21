@@ -5,6 +5,7 @@ import { Header } from "./component/header.mjs";
 import { RefreshButton } from "./component/refreshButton.mjs";
 import { AddInstanceButton } from "./component/addInstanceButton.mjs";
 import { clearAdminToken, getFetch, setAdminToken } from "./common.fetch.js";
+import { consumeHashToken } from "./authToken.mjs";
 
 const getInfoData = async () => {
   const res = await getFetch("/r/info");
@@ -30,6 +31,21 @@ const Login = ({ onAuthenticated }) => {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const authenticate = useCallback(async (value) => {
+    const response = await fetch("/r/auth/validate", {
+      method: "post",
+      cache: "no-cache",
+      headers: { Authorization: `Bearer ${value}` },
+    });
+    if (!response.ok) {
+      const details = await response.json().catch(() => ({}));
+      throw new Error(details.error || "JWT validation failed");
+    }
+    setAdminToken(value);
+    setToken("");
+    onAuthenticated();
+  }, [onAuthenticated]);
+
   const submit = async (event) => {
     event.preventDefault();
     const value = token.trim();
@@ -41,24 +57,24 @@ const Login = ({ onAuthenticated }) => {
     setBusy(true);
     setError("");
     try {
-      const response = await fetch("/r/auth/validate", {
-        method: "post",
-        cache: "no-cache",
-        headers: { Authorization: `Bearer ${value}` },
-      });
-      if (!response.ok) {
-        const details = await response.json().catch(() => ({}));
-        throw new Error(details.error || "JWT validation failed");
-      }
-      setAdminToken(value);
-      setToken("");
-      onAuthenticated();
+      await authenticate(value);
     } catch (loginError) {
       setError(loginError.message || "JWT validation failed");
     } finally {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    const value = consumeHashToken();
+    if (!value) return;
+
+    setBusy(true);
+    setError("");
+    authenticate(value)
+      .catch((loginError) => setError(loginError.message || "JWT validation failed"))
+      .finally(() => setBusy(false));
+  }, [authenticate]);
 
   return html`
     <main class="container py-5">

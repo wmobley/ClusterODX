@@ -28,6 +28,7 @@ When `admin-web-use-tapis-jwt` is true:
 4. Require a valid bearer token on every other `/r/*` admin API request. The token is revalidated through the provider on each request, so Tapis token expiration is honored without a separate server-side session lifetime.
 5. Add a client-side logout action that clears the in-memory token and returns to the token form. No server-side logout endpoint is needed.
 6. Update the browser client to show the JWT form until validation succeeds, add the bearer header to all admin API requests, and return to the form after a `401`.
+7. If the page URL contains `#token=<JWT>`, consume the fragment in the browser, remove it from the address bar with `history.replaceState`, and run the same bearer-token validation flow automatically. A failed validation still returns to the visible JWT form.
 7. Preserve the existing Basic Auth behavior when `admin-web-use-tapis-jwt` is false. The admin CLI remains independently password-protected and is not changed by this design.
 
 The Tapis provider must be initialized before a JWT request can succeed; missing provider configuration or provider unavailability fails closed with a generic `503`. Invalid or expired tokens return `401`; valid tokens that fail a configured tenant/user allowlist return `403`. Existing same-origin checks remain in force for state-changing requests, and bearer headers are not logged.
@@ -38,6 +39,7 @@ The Tapis provider must be initialized before a JWT request can succeed; missing
 - `index.js` — pass JWT mode and allowlists into the admin-web factory.
 - `restart.sh` — do not require `admin-pass` when JWT web mode is enabled.
 - `public/app.mjs` — login form and in-memory authenticated application state.
+- `public/authToken.mjs` — safe extraction and immediate removal of hash-provided JWTs.
 - `public/common.fetch.js` — bearer-header handling and auth failure handling.
 - `public/component/header.mjs` — client-side logout action.
 - `test/test-adminweb-auth.js` — JWT login/session/logout and Basic Auth compatibility coverage.
@@ -73,6 +75,7 @@ Browser JWT form → `Authorization: Bearer` validation request → Tapis provid
 - Verify invalid or expired tokens receive `401`.
 - Verify configured tenant/user allowlists reject unauthorized claims.
 - Verify client logout clears the in-memory token and returns to the login form.
+- Verify `#token=<JWT>` is consumed client-side, removed from browser history, and sent only as a bearer header to `/r/auth/validate`.
 - Verify JWTs do not appear in response bodies or captured logs.
 - Preserve existing Basic Auth and unconfigured-auth tests when JWT mode is disabled or unavailable.
 - Run all ClusterODX contract tests.
@@ -98,6 +101,14 @@ The deployment must decide whether empty allowlists mean “any valid Tapis toke
 - **Alternatives rejected:** Basic Auth and a server-side session after login.
 - **User feedback:** User explicitly requested that the login ask for the JWT token and said to fix it.
 - **Impact on implementation:** The web auth middleware and browser client both need changes; the admin CLI remains separate.
+
+### 2026-10-21 - Restore hash-token auto-login
+
+- **Decision:** Support `#token=<JWT>` links by consuming the fragment in the browser and reusing the existing bearer validation flow, then removing the fragment from the visible URL.
+- **Reason:** The approved JWT admin flow documented hash-token auto-login, but the current ClusterODX shell only rendered the paste form and ignored the fragment.
+- **Alternatives rejected:** Sending the token as a query parameter or serving it to the backend from the initial page request, because URL queries and server requests are more likely to be logged or retained.
+- **User feedback:** User explicitly requested fixing the URL token behavior.
+- **Impact on implementation:** Add `public/authToken.mjs`, invoke it from `public/app.mjs`, and cover extraction/removal behavior with `test/test-admin-url-token.js`.
 
 ## User feedback / decisions
 

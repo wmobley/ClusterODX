@@ -1,5 +1,6 @@
 const assert = require('assert');
 const TapisProvider = require('../libs/asr-providers/tapis');
+const logger = require('../libs/logger');
 
 (async () => {
     const provider = new TapisProvider({
@@ -34,6 +35,35 @@ const TapisProvider = require('../libs/asr-providers/tapis');
     assert.strictEqual(payload.nodeCount, 3);
     assert.strictEqual(payload.parameterSet.schedulerOptions[0].arg, '-A ALLOC-1');
     assert.strictEqual(payload.parameterSet.appArgs[0].name, 'clusterodx_url');
+
+    const originalWarn = logger.warn;
+    let warning = '';
+    logger.warn = message => { warning = message; };
+    provider.createApiClient = () => ({
+        post: async () => {
+            const error = new Error('Request failed with status code 400');
+            error.response = {
+                status: 400,
+                data: {
+                    message: 'Invalid execution system',
+                    token: 'must-not-be-logged'
+                }
+            };
+            throw error;
+        }
+    });
+    try {
+        await assert.rejects(
+            provider.submitJobWithoutData('test-token', 'clusterodx-test', 50, []),
+            /status code 400/
+        );
+    } finally {
+        logger.warn = originalWarn;
+    }
+    assert.match(warning, /"operation":"submit job"/);
+    assert.match(warning, /"status":400/);
+    assert.match(warning, /Invalid execution system/);
+    assert.doesNotMatch(warning, /must-not-be-logged/);
 
     provider.validateToken = async () => true;
     provider.submitJobWithoutData = async () => ({
