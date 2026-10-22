@@ -15,21 +15,21 @@ runtime by the request/authentication path rather than stored in this file.
 {
   "provider": "tapis",
   "tapis": {
-    "baseUrl": "https://tacc.tapis.io",
-    "tenantId": "tacc"
+    "baseUrl": "https://portals.tapis.io",
+    "tenantId": "portals"
   },
   "app": {
     "appId": "nodeodx-ls6",
     "appVersion": "2.3.1"
   },
   "system": {
-    "executionSystemId": "CHANGEME",
-    "archiveSystemId": "CHANGEME",
+    "executionSystemId": "ls6",
+    "archiveSystemId": "ls6",
     "logicalQueue": "vm-small",
     "queueFilter": ["vm-small"]
   },
   "scheduler": {
-    "defaultAllocation": "CHANGEME"
+    "defaultAllocation": "PT2050-DataX"
   },
   "job": {
     "maxJobTime": "01:00:00",
@@ -41,7 +41,7 @@ runtime by the request/authentication path rather than stored in this file.
     "appArgs": [
       {
         "name": "cluster_control_url",
-        "arg": "https://REPLACE_WITH_CLUSTERODX_HOST"
+        "arg": "https://REPLACE_WITH_CLUSTERODX_HOST/webhook/register-node"
       },
       {
         "name": "cluster_control_host",
@@ -61,7 +61,18 @@ runtime by the request/authentication path rather than stored in this file.
     {
       "maxImages": 200,
       "nodeCount": 1,
-      "logicalQueue": "vm-small"
+      "logicalQueue": "vm-small",
+      "coresPerNode": 16,
+      "memoryMB": 30720,
+      "maxJobTime": "04:00:00"
+    },
+    {
+      "maxImages": 1000,
+      "nodeCount": 2,
+      "logicalQueue": "normal",
+      "coresPerNode": 64,
+      "memoryMB": 30720,
+      "maxJobTime": "06:00:00"
     }
   ]
 }
@@ -73,6 +84,42 @@ The provider accepts these task options:
 - `tapis-allocation`
 - `tapis-max-run-time`
 - `tapis-node`
+
+When task options are omitted, the provider publishes `defaultByImages` values
+from `imageSizeMapping`. For example, a 468-image task receives the 1000-image
+defaults: `normal`, two nodes, and 360 minutes. Explicit task options remain
+overrides, so a caller that intentionally sends `tapis-node=1` or
+`tapis-max-run-time=480` will still get those values.
+
+For the current LS6 deployment, update the private runtime `tapis-config.json`
+before restarting ClusterODX:
+
+```json
+{
+  "app": {
+    "appId": "nodeodx-ls6",
+    "appVersion": "2.3.1"
+  },
+  "job": {
+    "appArgs": [
+      { "name": "cluster_control_url", "arg": "https://REPLACE_WITH_CLUSTERODX_HOST/webhook/register-node" },
+      { "name": "cluster_control_host", "arg": "REPLACE_WITH_CLUSTERODX_HOST" },
+      { "name": "cluster_control_port", "arg": "443" }
+    ],
+    "envVariables": []
+  }
+}
+```
+
+Merge these keys into the existing private file; do not replace its Tapis token
+handling or commit the file. The callback host must be the real public
+ClusterODX hostname, and the app must inject
+`TAPIS_ACCESS_TOKEN=${_tapisAccessToken}` according to the NodeODX app contract.
+
+If Tapis returns `No more authentication methods available` while submitting a
+job, the ClusterODX payload has already reached Tapis; repair the configured
+`ls6` execution/archive-system credential or authentication method in Tapis.
+That error is not fixed by changing the NodeODX app ID or resource mapping.
 
 ## Current status
 

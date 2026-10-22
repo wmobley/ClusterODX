@@ -8,14 +8,38 @@ const logger = require('../libs/logger');
         app: { appId: 'nodeodx-ls6', appVersion: '2.3.1' },
         system: { executionSystemId: 'ls6', archiveSystemId: 'ls6', logicalQueue: 'normal', queueFilter: ['normal', 'gpu-a100-small'] },
         scheduler: { defaultAllocation: 'PT2050-DataX' },
-        job: { maxJobTime: '02:00:00', nodeCount: 1, coresPerNode: 16, memoryMB: 30720, maxNodesPerJob: 4, appArgs: [{ name: 'clusterodx_url', arg: 'https://cluster.example/webhook/register-node' }] },
-        imageSizeMapping: [{ maxImages: 100, jobCount: 1, nodeCount: 2, logicalQueue: 'normal', maxJobTime: '04:00:00' }]
+        job: {
+            maxJobTime: '02:00:00',
+            nodeCount: 1,
+            coresPerNode: 16,
+            memoryMB: 8192,
+            maxNodesPerJob: 4,
+            appArgs: [
+                { name: 'cluster_control_url', arg: 'https://cluster.example/webhook/register-node' },
+                { name: 'cluster_control_host', arg: 'cluster.example' },
+                { name: 'cluster_control_port', arg: '443' }
+            ],
+            envVariables: []
+        },
+        imageSizeMapping: [{
+            maxImages: 1000,
+            jobCount: 1,
+            nodeCount: 2,
+            logicalQueue: 'normal',
+            coresPerNode: 64,
+            maxConcurrency: 64,
+            memoryMB: 30720,
+            maxJobTime: '06:00:00'
+        }]
     });
 
     await provider.initialize();
     assert.strictEqual(provider.canHandle(50), true);
-    assert.strictEqual(provider.canHandle(101), false);
+    assert.strictEqual(provider.canHandle(1001), false);
     assert.strictEqual(provider.getClusterOptions()[0].value, 'normal');
+    assert.deepStrictEqual(provider.getClusterOptions()[0].defaultByImages, [{ maxImages: 1000, value: 'normal' }]);
+    assert.deepStrictEqual(provider.getClusterOptions()[2].defaultByImages, [{ maxImages: 1000, value: '360' }]);
+    assert.deepStrictEqual(provider.getClusterOptions()[3].defaultByImages, [{ maxImages: 1000, value: '2' }]);
 
     let payload = null;
     provider.createApiClient = () => ({
@@ -25,16 +49,32 @@ const logger = require('../libs/logger');
         }
     });
 
+    const defaultResult = await provider.submitJobWithoutData('test-token', 'clusterodx-default', 468, []);
+    assert.strictEqual(defaultResult.primaryJobId, 'tapis-job-1');
+    assert.strictEqual(payload.appId, 'nodeodx-ls6');
+    assert.strictEqual(payload.appVersion, '2.3.1');
+    assert.strictEqual(payload.execSystemLogicalQueue, 'normal');
+    assert.strictEqual(payload.nodeCount, 2);
+    assert.strictEqual(payload.coresPerNode, 64);
+    assert.strictEqual(payload.memoryMB, 30720);
+    assert.strictEqual(payload.maxMinutes, 360);
+
     const result = await provider.submitJobWithoutData('test-token', 'clusterodx-test', 50, [
         { name: 'tapis-queue', value: 'gpu-a100-small' },
         { name: 'tapis-allocation', value: 'ALLOC-1' },
-        { name: 'tapis-node', value: '3' }
+        { name: 'tapis-node', value: '3' },
+        { name: 'tapis-max-run-time', value: '480' }
     ]);
     assert.strictEqual(result.primaryJobId, 'tapis-job-1');
     assert.strictEqual(payload.execSystemLogicalQueue, 'gpu-a100-small');
     assert.strictEqual(payload.nodeCount, 3);
+    assert.strictEqual(payload.maxMinutes, 480);
     assert.strictEqual(payload.parameterSet.schedulerOptions[0].arg, '-A ALLOC-1');
-    assert.strictEqual(payload.parameterSet.appArgs[0].name, 'clusterodx_url');
+    assert.deepStrictEqual(payload.parameterSet.appArgs.map(arg => arg.name), [
+        'cluster_control_url',
+        'cluster_control_host',
+        'cluster_control_port'
+    ]);
 
     const originalWarn = logger.warn;
     let warning = '';

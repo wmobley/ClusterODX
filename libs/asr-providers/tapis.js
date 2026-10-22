@@ -37,7 +37,13 @@ const summarizeJob = job => ({
     maxMinutes: job.maxMinutes,
     archiveOnAppError: job.archiveOnAppError,
     appArgsCount: job.parameterSet && Array.isArray(job.parameterSet.appArgs) ? job.parameterSet.appArgs.length : 0,
+    appArgNames: job.parameterSet && Array.isArray(job.parameterSet.appArgs)
+        ? job.parameterSet.appArgs.map(arg => arg && arg.name).filter(Boolean)
+        : [],
     envVariablesCount: job.parameterSet && Array.isArray(job.parameterSet.envVariables) ? job.parameterSet.envVariables.length : 0,
+    envVariableKeys: job.parameterSet && Array.isArray(job.parameterSet.envVariables)
+        ? job.parameterSet.envVariables.map(variable => variable && variable.key).filter(Boolean)
+        : [],
     schedulerOptions: job.parameterSet && Array.isArray(job.parameterSet.schedulerOptions)
         ? job.parameterSet.schedulerOptions.map(option => ({ name: option.name, hasArg: Boolean(option.arg) }))
         : []
@@ -70,11 +76,16 @@ const parseMinutes = (value, fallback = 60) => {
     return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.min(2880, parsed)) : fallback;
 };
 
+const mappingDefault = (mapping, key, fallback) => {
+    const value = mapping && mapping[key];
+    return value === undefined || value === null || value === '' ? fallback : value;
+};
+
 module.exports = class TapisAsrProvider extends AbstractASRProvider {
     constructor(userConfig) {
         super({
-            tapis: { baseUrl: 'https://tacc.tapis.io', tenantId: 'tacc' },
-            app: { appId: 'nodeodx-app', appVersion: '1.0' },
+            tapis: { baseUrl: 'https://portals.tapis.io', tenantId: 'portals' },
+            app: { appId: 'nodeodx-ls6', appVersion: '2.3.1' },
             system: { executionSystemId: 'CHANGEME!', archiveSystemId: 'CHANGEME!', logicalQueue: 'vm-small' },
             scheduler: { defaultAllocation: '' },
             job: { maxJobTime: '01:00:00', nodeCount: 1, coresPerNode: 1, memoryMB: 4096, archiveOnAppError: true, maxNodesPerJob: 1, appArgs: [], envVariables: [] },
@@ -125,14 +136,42 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return Math.max(1, Math.min(maximum, Number(configured) || 1));
     }
 
+    getImageSizeDefaultMappings() {
+        return (this.getConfig('imageSizeMapping', []) || [])
+            .map(mapping => {
+                const maxImages = Number(mapping && mapping.maxImages);
+                if (!Number.isFinite(maxImages) || maxImages <= 0) return null;
+
+                return {
+                    maxImages,
+                    queue: mappingDefault(mapping, 'logicalQueue', this.getConfig('system.logicalQueue', 'vm-small')),
+                    maxMinutes: parseMinutes(mappingDefault(mapping, 'maxJobTime', this.getConfig('job.maxJobTime', '01:00:00'))),
+                    nodeCount: Math.max(1, Math.min(
+                        Number(this.getConfig('job.maxNodesPerJob', 1)) || 1,
+                        Number(mappingDefault(mapping, 'computeNodeCount', mappingDefault(mapping, 'nodeCount', this.getConfig('job.nodeCount', 1)))) || 1
+                    ))
+                };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.maxImages - b.maxImages);
+    }
+
+    buildDefaultByImages(field) {
+        return this.getImageSizeDefaultMappings()
+            .map(mapping => mapping[field] === undefined || mapping[field] === null
+                ? null
+                : { maxImages: mapping.maxImages, value: `${mapping[field]}` })
+            .filter(Boolean);
+    }
+
     getClusterOptions() {
         const queues = this.getConfig('system.queueFilter', [this.getDefaultQueue()]);
         const queueDomain = Array.isArray(queues) ? queues : String(queues).split(',').map(value => value.trim()).filter(Boolean);
         return [
-            { name: 'tapis-queue', label: 'Queue', type: 'enum', value: this.getDefaultQueue(), domain: queueDomain },
+            { name: 'tapis-queue', label: 'Queue', type: 'enum', value: this.getDefaultQueue(), domain: queueDomain, defaultByImages: this.buildDefaultByImages('queue') },
             { name: 'tapis-allocation', label: 'Allocation', type: 'string', value: this.getConfig('scheduler.defaultAllocation', ''), domain: '' },
-            { name: 'tapis-max-run-time', label: 'Max Run Time', type: 'int', value: `${parseMinutes(this.getConfig('job.maxJobTime', '01:00:00'))}`, domain: 'integer: 1 <= x <= 2880' },
-            { name: 'tapis-node', label: 'Number of Nodes', type: 'int', value: `${this.getDefaultNodeCount()}`, domain: `integer: 1 <= x <= ${Number(this.getConfig('job.maxNodesPerJob', 1)) || 1}` }
+            { name: 'tapis-max-run-time', label: 'Max Run Time', type: 'int', value: `${parseMinutes(this.getConfig('job.maxJobTime', '01:00:00'))}`, domain: 'integer: 1 <= x <= 2880', defaultByImages: this.buildDefaultByImages('maxMinutes') },
+            { name: 'tapis-node', label: 'Number of Nodes', type: 'int', value: `${this.getDefaultNodeCount()}`, domain: `integer: 1 <= x <= ${Number(this.getConfig('job.maxNodesPerJob', 1)) || 1}`, defaultByImages: this.buildDefaultByImages('nodeCount') }
         ];
     }
 
@@ -213,6 +252,21 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             },
             subscriptions: []
         };
+        const jobSummary = summarizeJob(job);
+        logger.info(`[TAPIS] Submission plan resolved: ${JSON.stringify({
+            jobId: String(jobId),
+            imagesCount,
+            mappingMaxImages: mapping.maxImages || null,
+            appId: job.appId,
+            appVersion: job.appVersion,
+            queue: job.execSystemLogicalQueue,
+            nodeCount: job.nodeCount,
+            coresPerNode: job.coresPerNode,
+            memoryMB: job.memoryMB,
+            maxMinutes: job.maxMinutes,
+            appArgNames: jobSummary.appArgNames,
+            envVariableKeys: jobSummary.envVariableKeys
+        })}`);
         let response;
         try {
             response = await this.createApiClient(token).post('/v3/jobs/submit', job);
