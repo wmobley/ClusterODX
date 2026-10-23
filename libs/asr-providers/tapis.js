@@ -81,11 +81,25 @@ const mappingDefault = (mapping, key, fallback) => {
     return value === undefined || value === null || value === '' ? fallback : value;
 };
 
+const buildWorkerEnvVariables = (configuredEnv, tapisToken) => {
+    const envVariables = Array.isArray(configuredEnv) ? configuredEnv : [];
+
+    // Current Tapis leaves the historical ${_tapisAccessToken} macro literal.
+    // Pass the request JWT explicitly so NodeODX can authenticate its webhook.
+    return envVariables
+        .filter(variable => variable && variable.key !== 'TAPIS_ACCESS_TOKEN' && variable.key !== '_tapisAccessToken')
+        .concat({
+            key: 'TAPIS_ACCESS_TOKEN',
+            value: tapisToken,
+            description: 'Request-scoped Tapis JWT for NodeODX worker authentication'
+        });
+};
+
 module.exports = class TapisAsrProvider extends AbstractASRProvider {
     constructor(userConfig) {
         super({
             tapis: { baseUrl: 'https://portals.tapis.io', tenantId: 'portals' },
-            app: { appId: 'nodeodx-ls6', appVersion: '2.3.1' },
+            app: { appId: 'nodeodx-ls6', appVersion: '1.0.16' },
             system: { executionSystemId: 'CHANGEME!', archiveSystemId: 'CHANGEME!', logicalQueue: 'vm-small' },
             scheduler: { defaultAllocation: '' },
             job: { maxJobTime: '01:00:00', nodeCount: 1, coresPerNode: 1, memoryMB: 4096, archiveOnAppError: true, maxNodesPerJob: 1, appArgs: [], envVariables: [] },
@@ -247,7 +261,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             archiveOnAppError: this.getConfig('job.archiveOnAppError', true),
             parameterSet: {
                 appArgs: this.getConfig('job.appArgs', []),
-                envVariables: this.getConfig('job.envVariables', []),
+                envVariables: buildWorkerEnvVariables(this.getConfig('job.envVariables', []), token),
                 schedulerOptions: allocation ? [{ arg: `-A ${allocation}`, name: 'TACC Allocation' }] : []
             },
             subscriptions: []

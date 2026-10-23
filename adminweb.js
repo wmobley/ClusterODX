@@ -238,6 +238,118 @@ module.exports = {
       }
     });
 
+    // NodeODX calls this endpoint during shutdown. It is intentionally outside
+    // the admin middleware because workers authenticate with their Tapis token,
+    // not with the browser/CLI admin credentials.
+    app.post("/webhook/deregister-node", async (req, res) => {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const provider = options.tapisProvider || asrProvider.get();
+      const bearerToken = extractBearerToken(req.headers);
+      const bodyToken = typeof body.tapisToken === 'string' ? body.tapisToken : null;
+      const effectiveTapisToken = bearerToken || bodyToken;
+      let authMethod = null;
+      let identity = null;
+
+      if (effectiveTapisToken) {
+        if (!provider || typeof provider.validateToken !== 'function') {
+          return res.status(503).json({ error: 'Tapis authentication is unavailable' });
+        }
+
+        try {
+          await provider.validateToken(effectiveTapisToken);
+        } catch (error) {
+          if (error && error.response && [401, 403].includes(error.response.status)) {
+            return res.status(401).json({ error: 'Tapis JWT is invalid or expired' });
+          }
+          return res.status(503).json({ error: 'Tapis authentication is unavailable' });
+        }
+
+        const claims = decodeJwtPayload(effectiveTapisToken);
+        const username = tapisClaim(claims, 'username', 'user');
+        const tenantId = tapisClaim(claims, 'tenant_id', 'tenantId');
+        if (!username) return res.status(401).json({ error: 'Tapis JWT identity is missing' });
+
+        identity = {
+          username: String(username),
+          tenantId: tenantId ? String(tenantId) : null
+        };
+        authMethod = 'tapis-jwt';
+      } else {
+        const configuredSecret = config.registration_secret || options.registrationSecret ||
+          (provider && typeof provider.getConfig === 'function'
+            ? provider.getConfig('worker.registrationSecret', '')
+            : '');
+        const suppliedSecret = typeof body.registrationSecret === 'string' ? body.registrationSecret : '';
+        if (!configuredSecret || !suppliedSecret || !safeStringEqual(String(configuredSecret), suppliedSecret)) {
+          return res.status(401).json({ error: 'Tapis token or registration secret required' });
+        }
+        authMethod = 'registration-secret';
+      }
+
+      const hasNodeId = body.nodeId !== undefined && body.nodeId !== null && body.nodeId !== '';
+      let node = null;
+      if (hasNodeId) {
+        const nodeId = Number(body.nodeId);
+        if (!Number.isInteger(nodeId) || nodeId < 1) {
+          return res.status(400).json({ error: 'Invalid nodeId' });
+        }
+        node = nodes.nth(nodeId);
+      } else if (typeof body.registrationUuid === 'string' && body.registrationUuid.trim()) {
+        const registrationUuid = body.registrationUuid.trim();
+        node = nodes.find(existing => existing.nodeData.registrationUuid === registrationUuid);
+      }
+
+      if (!node) {
+        const hostname = typeof body.hostname === 'string' ? body.hostname.trim() : '';
+        const port = Number(body.port);
+        if (hostname || body.port !== undefined) {
+          if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
+            return res.status(400).json({ error: 'Valid hostname and port or nodeId required' });
+          }
+          node = nodes.find(existing => existing.hostname() === hostname && existing.port() === port);
+        }
+      }
+
+      if (!hasNodeId && !(typeof body.registrationUuid === 'string' && body.registrationUuid.trim()) &&
+          !(typeof body.hostname === 'string' && body.hostname.trim()) && body.port === undefined) {
+        return res.status(400).json({ error: 'nodeId, registrationUuid, or hostname and port required' });
+      }
+      if (!node) return res.status(404).json({ error: 'Node not found' });
+
+      if (authMethod === 'tapis-jwt') {
+        const owner = node.nodeData.tapisJobOwner || node.nodeData.tapisUser || node.nodeData.tapisUsername;
+        if (!owner) return res.status(403).json({ error: 'Node ownership is not configured' });
+
+        const ownerValue = String(owner).trim().toLowerCase();
+        const username = identity.username.toLowerCase();
+        const tenantId = identity.tenantId && identity.tenantId.toLowerCase();
+        const fullPrincipal = tenantId ? `${username}@${tenantId}` : null;
+        const ownerTenant = node.nodeData.tapisJobOwnerTenant && String(node.nodeData.tapisJobOwnerTenant).toLowerCase();
+        if ((ownerValue.includes('@')
+          ? ownerValue !== fullPrincipal
+          : ownerValue !== username)
+          || (ownerTenant && ownerTenant !== tenantId)) {
+          return res.status(403).json({ error: 'Tapis token does not own the node' });
+        }
+      }
+
+      const nodeEndpoint = safeNodeEndpoint(node.hostname(), node.port());
+      const wasAutoSpawned = node.isAutoSpawned();
+      nodes.remove(node);
+      await nodes.saveToDisk();
+
+      if (wasAutoSpawned && provider && typeof provider.destroyNode === 'function') {
+        try {
+          await provider.destroyNode(node);
+        } catch (error) {
+          logger.warn(`Cannot destroy Tapis worker ${nodeEndpoint} after deregistration: ${error.message}`);
+        }
+      }
+
+      logger.info(`Deregistered worker ${nodeEndpoint} via ${authMethod}`);
+      return res.json({ success: true, message: 'Node de-registered successfully', authMethod });
+    });
+
     const useTapisJwt = options.useTapisJwt === true;
     const allowedTenants = Array.isArray(options.allowedTenants) ? options.allowedTenants : [];
     const allowedUsers = Array.isArray(options.allowedUsers) ? options.allowedUsers : [];

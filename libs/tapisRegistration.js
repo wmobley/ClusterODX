@@ -38,7 +38,11 @@ const normalizeRegistration = (payload = {}) => {
             workerId: payload.workerId !== undefined ? payload.workerId : null,
             jobIndex: payload.jobIndex !== undefined ? payload.jobIndex : null,
             jobCount: payload.jobCount !== undefined ? payload.jobCount : null,
-            replicasPerJob: payload.replicasPerJob !== undefined ? payload.replicasPerJob : null
+            replicasPerJob: payload.replicasPerJob !== undefined ? payload.replicasPerJob : null,
+            registrationUuid: typeof payload.registrationUuid === 'string' ? payload.registrationUuid : null,
+            tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null,
+            tapisJobOwner: typeof payload.tapisJobOwner === 'string' ? payload.tapisJobOwner : null,
+            tapisJobOwnerTenant: typeof payload.tapisJobOwnerTenant === 'string' ? payload.tapisJobOwnerTenant : null
         }
     };
 };

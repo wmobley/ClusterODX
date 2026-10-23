@@ -20,7 +20,7 @@ runtime by the request/authentication path rather than stored in this file.
   },
   "app": {
     "appId": "nodeodx-ls6",
-    "appVersion": "2.3.1"
+    "appVersion": "1.0.16"
   },
   "system": {
     "executionSystemId": "ls6",
@@ -98,7 +98,7 @@ before restarting ClusterODX:
 {
   "app": {
     "appId": "nodeodx-ls6",
-    "appVersion": "2.3.1"
+    "appVersion": "1.0.16"
   },
   "job": {
     "appArgs": [
@@ -113,8 +113,10 @@ before restarting ClusterODX:
 
 Merge these keys into the existing private file; do not replace its Tapis token
 handling or commit the file. The callback host must be the real public
-ClusterODX hostname, and the app must inject
-`TAPIS_ACCESS_TOKEN=${_tapisAccessToken}` according to the NodeODX app contract.
+ClusterODX hostname. ClusterODX injects the request-scoped Tapis JWT into each
+submitted job as `TAPIS_ACCESS_TOKEN`; do not add the historical
+`${_tapisAccessToken}` macro to the app definition because current Tapis leaves
+that value literal.
 
 If Tapis returns `No more authentication methods available` while submitting a
 job, the ClusterODX payload has already reached Tapis; repair the configured
@@ -136,6 +138,17 @@ Worker registration requires either the request-scoped Tapis bearer token or a
 configured shared secret. Set the latter with `registration-secret` in the
 ClusterODX configuration, or with `worker.registrationSecret` in the Tapis ASR
 configuration. UUIDs and owner fields are metadata, not authentication.
+
+NodeODX shutdown uses `POST /webhook/deregister-node` with the same request-scoped
+Tapis bearer token. The preferred payload is the `nodeId` returned by registration;
+`registrationUuid`, or `hostname` plus `port`, are accepted as compatibility
+identifiers. A valid JWT may deregister only a node whose recorded
+`tapisJobOwner` matches the token username (and tenant when recorded). A configured
+registration secret is a cluster-level fallback for workers that cannot receive a
+Tapis token. Missing or invalid credentials return `401`, an ownership mismatch
+returns `403`, an invalid payload returns `400`, and an unknown node returns `404`.
+Successful deregistration returns JSON with `success: true` and removes the node
+from the persisted registry; auto-spawned Tapis jobs are also asked to terminate.
 
 The administrative web interface uses Tapis JWT authentication by default
 (`admin-web-use-tapis-jwt: true`). It presents a token field, validates the
@@ -167,8 +180,8 @@ positional arguments; arguments 3–5 are named `cluster_control_url`,
 `cluster_control_host`, and `cluster_control_port`. The runtime keeps the
 legacy `CLUSTERODM_*` environment-variable aliases for compatibility, but the
 callback target is the ClusterODX-compatible `POST /webhook/register-node`
-endpoint. `TAPIS_ACCESS_TOKEN=${_tapisAccessToken}` must be injected by the
-Tapis app; the runtime sends it only as an Authorization bearer token. The
+endpoint. ClusterODX injects the request-scoped JWT as `TAPIS_ACCESS_TOKEN`;
+the runtime sends it only as an Authorization bearer token. The
 NodeODX token in the JSON `token` field is a separate node credential and is
 not a substitute for the Tapis bearer.
 
