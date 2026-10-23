@@ -5,7 +5,7 @@ const logger = require('../libs/logger');
 (async () => {
     const provider = new TapisProvider({
         tapis: { baseUrl: 'https://example.tapis.io', tenantId: 'tacc' },
-        app: { appId: 'nodeodx-ls6', appVersion: '1.0.16' },
+        app: { appId: 'nodeodx-ls6', appVersion: '1.0.17' },
         system: { executionSystemId: 'ls6', archiveSystemId: 'ls6', logicalQueue: 'normal', queueFilter: ['normal', 'gpu-a100-small'] },
         scheduler: { defaultAllocation: 'PT2050-DataX' },
         job: {
@@ -20,8 +20,7 @@ const logger = require('../libs/logger');
                 { name: 'cluster_control_port', arg: '443' }
             ],
             envVariables: [
-                { key: 'TAPIS_ACCESS_TOKEN', value: '${_tapisAccessToken}' },
-                { key: 'NODEODM_CLEANUP_MINUTES', value: '0' }
+                { key: 'NODEODX_CLEANUP_TASKS_AFTER', value: '0' }
             ]
         },
         imageSizeMapping: [{
@@ -55,14 +54,14 @@ const logger = require('../libs/logger');
     const defaultResult = await provider.submitJobWithoutData('test-token', 'clusterodx-default', 468, []);
     assert.strictEqual(defaultResult.primaryJobId, 'tapis-job-1');
     assert.strictEqual(payload.appId, 'nodeodx-ls6');
-    assert.strictEqual(payload.appVersion, '1.0.16');
+    assert.strictEqual(payload.appVersion, '1.0.17');
     assert.strictEqual(payload.execSystemLogicalQueue, 'normal');
     assert.strictEqual(payload.nodeCount, 2);
     assert.strictEqual(payload.coresPerNode, 64);
     assert.strictEqual(payload.memoryMB, 30720);
     assert.strictEqual(payload.maxMinutes, 360);
     assert.deepStrictEqual(payload.parameterSet.envVariables, [
-        { key: 'NODEODM_CLEANUP_MINUTES', value: '0' },
+        { key: 'NODEODX_CLEANUP_TASKS_AFTER', value: '0' },
         {
             key: 'TAPIS_ACCESS_TOKEN',
             value: 'test-token',

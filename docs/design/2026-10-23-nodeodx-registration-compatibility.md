@@ -76,7 +76,7 @@ ClusterODX request JWT → Tapis job `parameterSet.envVariables.TAPIS_ACCESS_TOK
 
 ## Test plan
 
-- Validate the packaged app JSON has no unresolved token macro, preserves `NODEODM_CLEANUP_MINUTES=0`, disables launch-file archiving, and has the bumped version. Validate the ClusterODX submission payload contains the exact request JWT under `TAPIS_ACCESS_TOKEN`.
+- Validate the packaged app JSON has no unresolved token macro, preserves `NODEODX_CLEANUP_TASKS_AFTER=0`, includes the shared Corral import root, disables launch-file archiving, and has the bumped version. Validate the ClusterODX submission payload contains the exact request JWT under `TAPIS_ACCESS_TOKEN`.
 - Run ClusterODX admin-web tests for missing credentials, invalid bearer token, valid registration secret, valid JWT ownership, owner mismatch, unknown node, and successful deregistration.
 - Run existing ClusterODX test suite and `git diff --check`.
 - Rebuild the NodeODX ZIP and run `unzip -tq`.
@@ -105,7 +105,7 @@ Deploy the new ClusterODX code first, publish the new NodeODX ZIP/app version se
 
 ## Implementation result
 
-- Packaged NodeODX app version `1.0.16` keeps task cleanup disabled with `NODEODM_CLEANUP_MINUTES=0`; ClusterODX injects the actual request JWT into each Tapis job as `TAPIS_ACCESS_TOKEN`.
+- Packaged NodeODX app version `1.0.17` keeps task cleanup disabled with `NODEODX_CLEANUP_TASKS_AFTER=0` and adds the shared Corral import root; ClusterODX injects the actual request JWT into each Tapis job as `TAPIS_ACCESS_TOKEN`.
 - ClusterODX now exposes authenticated `POST /webhook/deregister-node`, removes the node from persisted state, and asks the Tapis provider to terminate auto-spawned jobs when applicable.
 - Added focused webhook coverage and included it in `npm test`.
 - Rebuilt `nodeodx-ls6.zip` locally with `SKIP_UPLOAD=1`; live Tapis app registration and upload remain deployment steps.

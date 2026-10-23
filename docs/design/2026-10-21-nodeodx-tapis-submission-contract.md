@@ -6,7 +6,7 @@ Status: Implemented
 
 Make ClusterODX submit Tapis jobs for the registered NodeODX application using the
 same resource-selection and worker-registration contract documented and tested by
-ClusterODX: `nodeodx-ls6` version `2.3.1`, the selected image-size mapping, and the
+ClusterODX: `nodeodx-ls6` version `1.0.17`, the selected image-size mapping, and the
 NodeODX registration arguments/environment.
 
 ## User need
@@ -26,19 +26,19 @@ the NodeODX registration arguments and worker environment.
 
 **Definition of success:** A 468-image submission uses the 1000-image mapping
 (two nodes, 64 cores per node, 30,720 MB, normal queue, six-hour limit), identifies
-`nodeodx-ls6:2.3.1`, includes the documented ClusterODX registration arguments,
+  `nodeodx-ls6:1.0.17`, includes the documented ClusterODX registration arguments,
 and has regression tests covering the final payload.
 
 ## Current code/system summary
 
 - `ClusterODX/libs/asr-providers/tapis.js` defaults to the portals tenant and
-  `nodeodx-ls6:2.3.1` when no deployment-local override is supplied.
+  `nodeodx-ls6:1.0.17` when no deployment-local override is supplied.
 - The deployed `tapis-config.json` currently identifies `nodeodm-ls62:1.0.14`.
 - `calculateNodeSubmissionPlan` allows `tapis-node` to override the image mapping.
 - `submitJobWithoutData` allows request `tapis-max-run-time` to override the
   mapping and submits configured app arguments/environment only.
 - The repository’s `ClusterODX/docs/tapis.md` and provider test identify the
-  NodeODX application as `nodeodx-ls6:2.3.1`.
+  NodeODX application as `nodeodx-ls6:1.0.17`.
 - The same documentation defines `cluster_control_url`, `cluster_control_host`,
   and `cluster_control_port` as the registration arguments.
 - The live `tapis-config.json` is deployment-local and is not part of this repo;
@@ -46,7 +46,7 @@ and has regression tests covering the final payload.
 
 ## Proposed design
 
-1. Change the provider fallback application identity to `nodeodx-ls6:2.3.1`.
+1. Change the provider fallback application identity to `nodeodx-ls6:1.0.17`.
 2. Publish image-size mapping defaults through the Tapis task-option metadata so
    the caller receives the correct defaults for the image count. Preserve explicit
    task options as overrides, matching the existing ClusterODM behavior; an
@@ -64,7 +64,7 @@ and has regression tests covering the final payload.
 The exact 468-image default is the 1000-image mapping:
 
 ```text
-appId/version: nodeodx-ls6 / 2.3.1
+appId/version: nodeodx-ls6 / 1.0.17
 queue:         normal
 nodeCount:     2
 coresPerNode:  64
@@ -116,7 +116,7 @@ calls ClusterODX registration endpoint → ClusterODX records the worker route.
 - Only changing `tapis-config.json`: rejected because the provider fallback and
   payload construction would still be wrong.
 - Keeping `nodeodm-ls62`: rejected because ClusterODX workers use NodeODX and the
-  repository’s integration contract names `nodeodx-ls6:2.3.1`.
+  repository’s integration contract names `nodeodx-ls6:1.0.17`.
 - Fixing Tapis system credentials in code: rejected because credentials are owned
   by the Tapis system/Security Kernel and must not be embedded in ClusterODX.
 
@@ -153,7 +153,7 @@ local tests.
 
 ## Decisions
 
-- Use the repository-documented NodeODX identity `nodeodx-ls6:2.3.1` as the target
+- Use the repository-documented NodeODX identity `nodeodx-ls6:1.0.17` as the target
   application contract.
 - Preserve explicit Tapis task-option overrides while publishing mapping-based
   defaults for image-count-aware UI/task creation.
@@ -163,7 +163,7 @@ local tests.
 ### 2026-10-21 — Implementation completed
 
 - **Result:** The provider fallback now targets `https://portals.tapis.io`,
-  publishes image-count defaults, submits `nodeodx-ls6:2.3.1`, preserves the
+  publishes image-count defaults, submits `nodeodx-ls6:1.0.17`, preserves the
   configured NodeODX callback arguments/environment, and emits sanitized
   submission-plan diagnostics.
 - **Deviation:** The private deployment-local `tapis-config.json` was not

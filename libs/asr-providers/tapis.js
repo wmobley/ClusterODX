@@ -99,7 +99,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     constructor(userConfig) {
         super({
             tapis: { baseUrl: 'https://portals.tapis.io', tenantId: 'portals' },
-            app: { appId: 'nodeodx-ls6', appVersion: '1.0.16' },
+            app: { appId: 'nodeodx-ls6', appVersion: '1.0.17' },
             system: { executionSystemId: 'CHANGEME!', archiveSystemId: 'CHANGEME!', logicalQueue: 'vm-small' },
             scheduler: { defaultAllocation: '' },
             job: { maxJobTime: '01:00:00', nodeCount: 1, coresPerNode: 1, memoryMB: 4096, archiveOnAppError: true, maxNodesPerJob: 1, appArgs: [], envVariables: [] },

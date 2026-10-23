@@ -20,7 +20,7 @@ runtime by the request/authentication path rather than stored in this file.
   },
   "app": {
     "appId": "nodeodx-ls6",
-    "appVersion": "1.0.16"
+    "appVersion": "1.0.17"
   },
   "system": {
     "executionSystemId": "ls6",
@@ -98,7 +98,7 @@ before restarting ClusterODX:
 {
   "app": {
     "appId": "nodeodx-ls6",
-    "appVersion": "1.0.16"
+    "appVersion": "1.0.17"
   },
   "job": {
     "appArgs": [
