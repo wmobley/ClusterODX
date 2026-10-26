@@ -44,15 +44,25 @@ const logger = require('../libs/logger');
     assert.deepStrictEqual(provider.getClusterOptions()[3].defaultByImages, [{ maxImages: 1000, value: '2' }]);
 
     let payload = null;
+    const originalInfo = logger.info;
+    const infoMessages = [];
+    logger.info = message => infoMessages.push(message);
     provider.createApiClient = () => ({
-        post: async (_path, body) => {
+        post: async (_path, body, options) => {
+            assert.strictEqual(_path, '/v3/jobs/submit');
+            assert.strictEqual(options.timeout, 60000);
             payload = body;
-            return { data: { result: { uuid: 'tapis-job-1' } } };
+            return { status: 201, data: { result: { uuid: 'tapis-job-1' } } };
         }
     });
 
     const defaultResult = await provider.submitJobWithoutData('test-token', 'clusterodx-default', 468, []);
     assert.strictEqual(defaultResult.primaryJobId, 'tapis-job-1');
+    logger.info = originalInfo;
+    const accepted = infoMessages.find(message => message.includes('Job submission accepted'));
+    assert.match(accepted, /"status":201/);
+    assert.match(accepted, /"tapisJobId":"tapis-job-1"/);
+    assert.doesNotMatch(infoMessages.join('\n'), /test-token/);
     assert.strictEqual(payload.appId, 'nodeodx-ls6');
     assert.strictEqual(payload.appVersion, '1.0.17');
     assert.strictEqual(payload.execSystemLogicalQueue, 'normal');
@@ -115,6 +125,29 @@ const logger = require('../libs/logger');
     assert.match(warning, /"status":400/);
     assert.match(warning, /Invalid execution system/);
     assert.doesNotMatch(warning, /must-not-be-logged/);
+
+    logger.warn = message => { warning = message; };
+    try {
+        provider.createApiClient = () => ({
+            post: async () => {
+                const error = new Error('timeout of 60000ms exceeded');
+                error.code = 'ECONNABORTED';
+                throw error;
+            }
+        });
+        await assert.rejects(provider.submitJobWithoutData('test-token', 'timeout-task', 50), /timeout/);
+        assert.match(warning, /"code":"ECONNABORTED"/);
+        assert.match(warning, /"timeoutMs":60000/);
+        assert.match(warning, /"jobId":"timeout-task"/);
+        assert.strictEqual(provider.findPendingTask('timeout-task'), null);
+        provider.createApiClient = () => ({ post: async () => ({ status: 200, data: {} }) });
+        await assert.rejects(provider.submitJobWithoutData('test-token', 'invalid-task', 50), /job UUID/);
+        assert.match(warning, /"status":200/);
+        assert.match(warning, /did not include a job UUID/);
+        assert.doesNotMatch(warning, /test-token/);
+    } finally {
+        logger.warn = originalWarn;
+    }
 
     provider.validateToken = async () => true;
     provider.submitJobWithoutData = async () => ({

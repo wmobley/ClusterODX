@@ -35,8 +35,9 @@ node index.js [parameters]
 
 By default, the administrative web interface on port 10000 uses Tapis JWT
 authentication. Open the page and paste a Tapis access token; the token is kept
-only in browser memory and must be sent as a bearer token for each administrative
-API request. Set `admin-web-allowed-tenants` and `admin-web-allowed-users` to
+in tab-scoped sessionStorage after validation and is revalidated after refresh.
+Logout or rejected authentication clears it. It is sent as a bearer token for
+each administrative API request. Set `admin-web-allowed-tenants` and `admin-web-allowed-users` to
 restrict which Tapis identities may sign in.
 
 The administrative CLI on port 8080 remains password-protected. Set

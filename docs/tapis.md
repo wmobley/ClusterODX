@@ -153,13 +153,25 @@ from the persisted registry; auto-spawned Tapis jobs are also asked to terminate
 The administrative web interface uses Tapis JWT authentication by default
 (`admin-web-use-tapis-jwt: true`). It presents a token field, validates the
 submitted bearer token through the Tapis provider, and keeps the token only in
-browser memory. Optional `admin-web-allowed-tenants` and
+tab-scoped sessionStorage after successful validation. Refresh restores and
+revalidates it; logout, HTTP 401, or validation HTTP 401/403 clears it. Storage
+failures fall back to memory-only login. Same-origin scripts can access this
+storage; browsers may also copy it when duplicating tabs or restoring sessions. Optional `admin-web-allowed-tenants` and
 `admin-web-allowed-users` configuration values restrict the accepted Tapis
 identities. The administrative CLI remains protected by `admin-pass`. Set
 `admin-web-use-tapis-jwt: false` to use that password for the web interface as
 well. State-changing cross-origin requests are rejected.
 
 ## Handoff observability
+
+Tapis job submission has a 60-second HTTP request timeout. A successful response
+with a job UUID emits `[TAPIS] Job submission accepted` with the ClusterODX job
+name, Tapis job UUID, HTTP status, and elapsed milliseconds. Failed requests and
+responses missing a job UUID emit `[TAPIS] submit job failed`, including the
+timeout and elapsed time. Acceptance means Tapis returned a UUID; worker
+registration happens later. A timeout leaves acceptance uncertain: check Tapis
+for the job name before resubmitting, since Tapis may still have created it.
+ClusterODX does not automatically retry this submission.
 
 ClusterODX and NodeODX emit allowlisted JSON log messages for the worker handoff.
 They use the event name `odx_node_handoff` and phases including

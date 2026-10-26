@@ -1,15 +1,9 @@
-let adminToken = null;
-
-export const setAdminToken = (token) => {
-  adminToken = token;
-};
-
-export const clearAdminToken = () => {
-  adminToken = null;
-};
+import { getAdminToken, clearAdminToken } from "./authToken.mjs";
+export { setAdminToken, clearAdminToken } from "./authToken.mjs";
 
 const authenticatedHeaders = (headers = {}) => {
   const result = { ...headers };
+  const adminToken = getAdminToken();
   if (adminToken) result.Authorization = `Bearer ${adminToken}`;
   return result;
 };

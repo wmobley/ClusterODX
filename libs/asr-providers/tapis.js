@@ -7,6 +7,7 @@ const logger = require('../logger');
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|credential|api.?key)/i;
 const MAX_LOG_VALUE_LENGTH = 2000;
+const SUBMISSION_TIMEOUT_MS = 60000;
 
 const sanitizeForLog = (value, depth = 0) => {
     if (value === null || value === undefined) return value;
@@ -282,17 +283,31 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             envVariableKeys: jobSummary.envVariableKeys
         })}`);
         let response;
+        const startedAt = Date.now();
         try {
-            response = await this.createApiClient(token).post('/v3/jobs/submit', job);
+            response = await this.createApiClient(token).post('/v3/jobs/submit', job, {
+                timeout: SUBMISSION_TIMEOUT_MS
+            });
+            const uuid = response && response.data && response.data.result && response.data.result.uuid;
+            if (!uuid) throw new Error('Tapis response did not include a job UUID');
         } catch (error) {
             logTapisRequestFailure('submit job', error, {
                 baseUrl: this.getConfig('tapis.baseUrl'),
+                jobId: String(jobId),
+                status: response ? response.status : error.response && error.response.status,
+                timeoutMs: SUBMISSION_TIMEOUT_MS,
+                elapsedMs: Date.now() - startedAt,
                 job: summarizeJob(job)
             });
             throw error;
         }
-        const uuid = response && response.data && response.data.result && response.data.result.uuid;
-        if (!uuid) throw new Error('Tapis response did not include a job UUID');
+        const uuid = response.data.result.uuid;
+        logger.info(`[TAPIS] Job submission accepted: ${JSON.stringify({
+            jobId: String(jobId),
+            tapisJobId: uuid,
+            status: response.status,
+            elapsedMs: Date.now() - startedAt
+        })}`);
         this.activeJobs.set(uuid, { jobId, imagesCount, status: 'SUBMITTING', token });
         return { primaryJobId: uuid, submittedJobs: [{ tapisJobId: uuid, jobName: job.name }] };
     }

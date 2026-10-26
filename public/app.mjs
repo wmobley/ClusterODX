@@ -4,8 +4,8 @@ import { NodeList } from "./component/nodeList.mjs";
 import { Header } from "./component/header.mjs";
 import { RefreshButton } from "./component/refreshButton.mjs";
 import { AddInstanceButton } from "./component/addInstanceButton.mjs";
-import { clearAdminToken, getFetch, setAdminToken } from "./common.fetch.js";
-import { consumeHashToken } from "./authToken.mjs";
+import { clearAdminToken, getFetch } from "./common.fetch.js";
+import { getStartupToken, validateAdminToken, cancelAdminValidation } from "./authToken.mjs";
 
 const getInfoData = async () => {
   const res = await getFetch("/r/info");
@@ -32,16 +32,7 @@ const Login = ({ onAuthenticated }) => {
   const [busy, setBusy] = useState(false);
 
   const authenticate = useCallback(async (value) => {
-    const response = await fetch("/r/auth/validate", {
-      method: "post",
-      cache: "no-cache",
-      headers: { Authorization: `Bearer ${value}` },
-    });
-    if (!response.ok) {
-      const details = await response.json().catch(() => ({}));
-      throw new Error(details.error || "JWT validation failed");
-    }
-    setAdminToken(value);
+    if (!await validateAdminToken(value)) return;
     setToken("");
     onAuthenticated();
   }, [onAuthenticated]);
@@ -66,7 +57,7 @@ const Login = ({ onAuthenticated }) => {
   };
 
   useEffect(() => {
-    const value = consumeHashToken();
+    const value = getStartupToken();
     if (!value) return;
 
     setBusy(true);
@@ -74,6 +65,7 @@ const Login = ({ onAuthenticated }) => {
     authenticate(value)
       .catch((loginError) => setError(loginError.message || "JWT validation failed"))
       .finally(() => setBusy(false));
+    return cancelAdminValidation;
   }, [authenticate]);
 
   return html`
