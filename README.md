@@ -205,6 +205,13 @@ the form stays open for correction. If an older version saved such an entry and
 it shows offline with `Invalid URL` in the log, delete that entry and add it again
 using the hostname alone. ClusterODX uses HTTPS for port 443 and HTTP for other ports.
 
+For tasks submitted with `import_path`, ClusterODX forwards the shared directory
+to the selected existing worker using the same path mappings as Tapis handoffs.
+Path-only tasks proceed from initialization directly to commit; tasks with
+uploaded files still send those files. The worker must be able to access the
+directory and allow it in its configured shared import roots. Adding an existing
+worker does not reassign a task already waiting for a Tapis registration.
+
 It is also possible to pre-populate nodes using JSON. If starting ClusterODX from apptainer or docker, the relevant JSON is available at `docker/data/nodes.json`. Contents might look similar to the following:
 
 ```javascript

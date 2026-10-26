@@ -30,6 +30,7 @@ const statusCodes = require('./statusCodes');
 const asrProvider = require('./asrProvider');
 const logger = require('./logger');
 const events = require('events');
+const { translateImportPathForNode } = require('./tapisRegistration');
 
 const assureUniqueFilename = (dstPath, filename) => {
     return new Promise((resolve, _) => {
@@ -431,6 +432,12 @@ module.exports = {
                             contents: outputs
                         });
                     }
+                    if (pathImport){
+                        body.push({
+                            name: 'import_path',
+                            contents: translateImportPathForNode(pathImport, node.hostname())
+                        });
+                    }
 
                     const curl = curlInstance(resolve, reject, 
                         `${node.proxyTargetUrl()}/task/new/init?token=${node.getToken()}`,
@@ -448,6 +455,7 @@ module.exports = {
             };
 
             const taskNewUpload = async () => {
+                if (fileNames.length === 0) return;
                 return new Promise((resolve, reject) => {
                     const MAX_RETRIES = 5;
 
