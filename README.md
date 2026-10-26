@@ -198,6 +198,13 @@ telnet localhost 8080
 
 You should always check to make sure which ports are being used to run NodeODX if ClusterODX is not wired correctly.
 
+In the admin web interface's **Add Node** form, enter only the hostname (for example,
+`ls6.tacc.utexas.edu`), the port in its separate field, and the worker's configured
+token. URLs such as `https://ls6.tacc.utexas.edu` are rejected with a visible error;
+the form stays open for correction. If an older version saved such an entry and
+it shows offline with `Invalid URL` in the log, delete that entry and add it again
+using the hostname alone. ClusterODX uses HTTPS for port 443 and HTTP for other ports.
+
 It is also possible to pre-populate nodes using JSON. If starting ClusterODX from apptainer or docker, the relevant JSON is available at `docker/data/nodes.json`. Contents might look similar to the following:
 
 ```javascript

@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node test/test-admincli-port.js && node test/test-admin-url-token.js && node test/test-admin-session-token.js && node test/test-admin-task-list.js && node test/test-admin-task-ui.js && node test/test-adminweb-auth.js && node test/test-webhook-deregistration.js && node test/test-config-contract.js && node test/test-tapis-local-handoff.js && node test/test-tapis-observability.js && node test/test-tapis-options.js && node test/test-tapis-provider.js && node test/test-tapis-registration.js",
+    "test": "node test/test-admincli-port.js && node test/test-admin-url-token.js && node test/test-admin-session-token.js && node test/test-admin-task-list.js && node test/test-admin-task-ui.js && node test/test-adminweb-auth.js && node test/test-admin-node-add.js && node test/test-webhook-deregistration.js && node test/test-config-contract.js && node test/test-tapis-local-handoff.js && node test/test-tapis-observability.js && node test/test-tapis-options.js && node test/test-tapis-provider.js && node test/test-tapis-registration.js",
     "winbundle": "node winbundle.js"
   },
   "repository": {

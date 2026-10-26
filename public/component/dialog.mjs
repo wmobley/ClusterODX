@@ -61,7 +61,7 @@ export const DeleteInstanceDialog = ({ open, handlerClose, handlerApply }) =>
  *
  * @returns
  */
-export const AddInstanceDialog = ({ open, handlerClose, handlerApply }) =>
+export const AddInstanceDialog = ({ open, handlerClose, handlerApply, error = "" }) =>
   html`<${Dialog}
     open=${open}
     title='Add Node engine instance'
@@ -69,9 +69,11 @@ export const AddInstanceDialog = ({ open, handlerClose, handlerApply }) =>
     handlerApply=${handlerApply}
     labelApply="Apply"
     modalBody=${html`<form>
+      ${error && html`<div class="alert alert-danger" role="alert">${error}</div>`}
       <div class="mb-3">
         <label for="hostname" class="col-form-label">Hostname:</label>
         <input type="text" class="form-control" id="hostname" />
+        <div class="form-text">Hostname or IP address only; enter the port below. Do not include http:// or https://.</div>
       </div>
       <div class="mb-3">
         <label for="port" class="col-form-label">Port:</label>

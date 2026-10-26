@@ -31,6 +31,7 @@ const { extractBearerToken, normalizeRegistration } = require("./libs/tapisRegis
 const { submitPendingTask } = require("./libs/tapisWorker");
 const { classifySubmitError, logHandoffEvent, safeNodeEndpoint } = require("./libs/observability");
 const crypto = require("crypto");
+const { isIP } = require("net");
 
 const safeStringEqual = (left, right) => {
   if (typeof left !== "string" || typeof right !== "string") return false;
@@ -510,14 +511,22 @@ module.exports = {
     });
 
     app.post("/r/node/add", (req, res) => {
-      const { hostname, port, token } = req.body;
+      const hostname = typeof req.body.hostname === "string" ? req.body.hostname.trim() : "";
+      const port = ["string", "number"].includes(typeof req.body.port) ? Number(req.body.port) : NaN;
+      const { token } = req.body;
+      if (!hostname || (!/^[a-zA-Z0-9._-]+$/.test(hostname) && !isIP(hostname))) {
+        return res.status(400).json({ error: "Enter a hostname or IP address only, without http://, https://, a port, or a path." });
+      }
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return res.status(400).json({ error: "Enter a port between 1 and 65535." });
+      }
       const node = nodes.addUnique(hostname, port, token);
 
       if (node) {
         node.updateInfo();
         res.send({ success: true });
       } else {
-        res.send({ error: "Invalid" });
+        res.status(409).json({ error: "Node already exists or has invalid parameters." });
       }
     });
 

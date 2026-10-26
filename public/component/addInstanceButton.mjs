@@ -5,8 +5,9 @@ import { AddInstanceDialog } from "./dialog.mjs";
 
 export const AddInstanceButton = ({ getNodes }) => {
   const [open, setOpen] = useState(false);
+  const [error, setError] = useState("");
 
-  const handlerApply = (props) => {
+  const handlerApply = async (props) => {
     const domDialog = props.currentTarget.closest(".modal-dialog");
     if (domDialog) {
       const domhostName = domDialog.querySelector("#hostname");
@@ -16,33 +17,31 @@ export const AddInstanceButton = ({ getNodes }) => {
       const port = Number(domPort.value);
       const token = domToken.value;
 
-      doAddNode(hostname, port, token);
-
-      //Clearing
-      domDialog.querySelector("#hostname").value = "";
-      domDialog.querySelector("#port").value = "";
-      domDialog.querySelector("#token").value = "";
-      setOpen(false);
-    }
-  };
-
-  const doAddNode = (hostname, port, token) => {
-    postFetch("/r/node/add", {
-      body: { hostname, port, token },
-    })
-      .then((res) => res.json())
-      .then((isSuccess) => {
+      setError("");
+      try {
+        const response = await postFetch("/r/node/add", {
+          body: { hostname, port, token },
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          throw new Error(result.error || "Unable to add node.");
+        }
+        domhostName.value = "";
+        domPort.value = "";
+        domToken.value = "";
+        setOpen(false);
         getNodes();
-      })
-      .catch((err) => {
-        console.error(err);
-      });
+      } catch (err) {
+        setError(err.message || "Unable to add node.");
+      }
+    }
   };
 
   return html`<><button classList="btn btn-primary" onClick=${() => setOpen(true)}>Add Node</button>
     <${AddInstanceDialog}
       open=${open}
-      handlerClose=${() => setOpen(false)}
+      error=${error}
+      handlerClose=${() => { setOpen(false); setError(""); }}
       handlerApply=${handlerApply}
     ></${AddInstanceDialog}>`;
 };
