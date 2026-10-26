@@ -57,6 +57,23 @@ const tapisClaim = (claims, name, fallback) => {
   return claims[`tapis/${name}`] || claims[name] || claims[fallback] || null;
 };
 
+const pendingTaskBelongsToIdentity = (pending, identity) => {
+  if (!pending || !identity) return false;
+  const owner = pending.tapisJobOwner || pending.nodeUser;
+  if (!owner) return false;
+
+  const normalizedOwner = String(owner).trim().toLowerCase();
+  const username = String(identity.username || '').trim().toLowerCase();
+  const tenant = String(identity.tenantId || '').trim().toLowerCase();
+  const ownerTenant = String(pending.tapisJobOwnerTenant || '').trim().toLowerCase();
+  if (!username || !tenant || !ownerTenant) return false;
+  const ownerMatches = normalizedOwner.includes('@')
+    ? normalizedOwner === `${username}@${tenant}`
+    : normalizedOwner === username;
+
+  return ownerMatches && (!ownerTenant || ownerTenant === tenant);
+};
+
 module.exports = {
   create: function (options) {
     logger.info("Starting admin web interface on " + options.port);
@@ -113,12 +130,21 @@ module.exports = {
       const effectiveTapisToken = bearerToken || registration.tapisToken;
       let authenticated = false;
       let authMethod = null;
+      let validatedIdentity = null;
 
       if (effectiveTapisToken) {
         try {
           await provider.validateToken(effectiveTapisToken);
           authenticated = true;
           authMethod = "tapis-jwt";
+          const claims = decodeJwtPayload(effectiveTapisToken);
+          const username = claims && claims['tapis/username'];
+          const tenantId = claims && claims['tapis/tenant_id'];
+          if (!username || !tenantId) throw new Error('Canonical Tapis identity claims are missing');
+          validatedIdentity = {
+            username: String(username),
+            tenantId: String(tenantId)
+          };
         } catch (error) {
           logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
             outcome: "rejected",
@@ -152,8 +178,116 @@ module.exports = {
         return res.status(401).json({ error: "Tapis token or registration secret required" });
       }
 
-      const pending = provider.findPendingTask(registration.tapisJobUuid) ||
-                      provider.findPendingTask(registration.registrationUuid);
+      // Preserve the original ClusterODM contract for explicitly marked
+      // worker registrations. These nodes are authenticated, ordinary
+      // cluster nodes and must not claim, consume, or submit a pending Tapis
+      // task. Keep task-bound handoff behavior for every other role.
+      if (registration.role === 'worker') {
+        let node = nodes.find(existing =>
+          existing.hostname() === registration.hostname && existing.port() === registration.port);
+        if (node && node.isAutoSpawned()) {
+          logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+            outcome: "rejected",
+            error_class: "validation_error"
+          }));
+          return res.status(409).json({ error: "Node is already managed by a Tapis task" });
+        }
+
+        if (node) {
+          const recordedOwner = node.nodeData.tapisJobOwner || node.nodeData.tapisUser || node.nodeData.tapisUsername;
+          const recordedTenant = node.nodeData.tapisJobOwnerTenant;
+          const ownerMatches = authMethod !== "tapis-jwt" || !recordedOwner ||
+            (validatedIdentity && recordedTenant && String(recordedOwner) === validatedIdentity.username &&
+             String(recordedTenant).toLowerCase() === String(validatedIdentity.tenantId || '').toLowerCase());
+          if (!ownerMatches) {
+            logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+              outcome: "rejected",
+              error_class: "auth_error"
+            }));
+            return res.status(403).json({ error: "Tapis token does not own the registered node" });
+          }
+
+          node.updateInfo();
+          logHandoffEvent(logger, "webhook_completed", Object.assign(registrationFields(), {
+            outcome: "success"
+          }));
+          logger.info(`Confirmed legacy worker ${registration.hostname}:${registration.port}`);
+          return res.json({
+            success: true,
+            message: "Node already registered",
+            nodeId: nodes.all().indexOf(node) + 1,
+            authMethod,
+            registrationMode: node.nodeData.registrationMode || "legacy-worker"
+          });
+        }
+
+        node = nodes.addUnique(registration.hostname, registration.port, registration.nodeToken);
+        if (!node) {
+          logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+            outcome: "rejected",
+            error_class: "validation_error"
+          }));
+          return res.status(409).json({ error: "Node already exists or registration is invalid" });
+        }
+
+        const legacyMetadata = Object.assign({}, registration.metadata, {
+          registrationMode: "legacy-worker",
+          nodeReady: registration.nodeReady,
+          tapisJobOwner: validatedIdentity ? validatedIdentity.username : null,
+          tapisJobOwnerTenant: validatedIdentity ? validatedIdentity.tenantId : null
+        });
+        Object.assign(node.nodeData, legacyMetadata);
+        await nodes.saveToDisk();
+        node.updateInfo();
+
+        logHandoffEvent(logger, "webhook_completed", Object.assign(registrationFields(), {
+          outcome: "success"
+        }));
+        logger.info(`Registered legacy worker ${registration.hostname}:${registration.port}`);
+        return res.json({
+          success: true,
+          message: "Node registered successfully",
+          nodeId: nodes.all().indexOf(node) + 1,
+          authMethod,
+          registrationMode: "legacy-worker"
+        });
+      }
+
+      if (authMethod !== 'tapis-jwt') {
+        logHandoffEvent(logger, 'webhook_rejected', Object.assign(registrationFields(), {
+          outcome: 'rejected',
+          error_class: 'auth_error'
+        }));
+        return res.status(401).json({ error: 'Tapis JWT required for task-bound registration' });
+      }
+
+      let pending = provider.findPendingTask(registration.tapisJobUuid) ||
+                    provider.findPendingTask(registration.registrationUuid);
+      let pendingMatchMode = pending ? 'identifier' : null;
+
+      // The UUIDs are correlation metadata, not the ownership boundary. The
+      // old ClusterODM path matched pending work to the authenticated Tapis
+      // user when the UUID sent by the worker differed from the UUID recorded
+      // at submission time. Preserve that behavior, but reject ambiguity so
+      // one user's concurrent jobs cannot claim each other accidentally.
+      if (!pending && authMethod === 'tapis-jwt' && validatedIdentity &&
+          typeof provider.findPendingTaskByUser === 'function') {
+        const ownerMatch = provider.findPendingTaskByUser(validatedIdentity);
+        if (ownerMatch.count > 1) {
+          logHandoffEvent(logger, 'webhook_rejected', Object.assign(registrationFields(), {
+            outcome: 'rejected',
+            error_class: 'ambiguous_owner_match'
+          }));
+          return res.status(409).json({
+            error: 'Multiple pending Tapis tasks belong to this user; registration correlation is required'
+          });
+        }
+        if (ownerMatch.task) {
+          pending = ownerMatch.task;
+          pendingMatchMode = 'user';
+          logger.info(`Matched pending Tapis task ${pending.taskId} to authenticated user ${validatedIdentity.username}@${validatedIdentity.tenantId}`);
+        }
+      }
       if (!pending) {
         const existingNode = registration.tapisJobUuid && nodes.find(node =>
           node.getTapisJobId && node.getTapisJobId() === registration.tapisJobUuid);
@@ -175,10 +309,12 @@ module.exports = {
         return res.status(404).json({ error: "No pending Tapis task matches this registration" });
       }
 
-      // A valid Tapis token alone must not be able to claim another user's
-      // pending job. The worker token is expected to be the same request token
-      // that created the Tapis submission.
-      if (effectiveTapisToken && pending.token && !safeStringEqual(effectiveTapisToken, pending.token)) {
+      // A valid Tapis token may claim only work owned by the same Tapis user.
+      // Exact token equality is retained only for old in-memory pending records
+      // that predate owner metadata.
+      const ownerMatches = pendingTaskBelongsToIdentity(pending, validatedIdentity);
+      const tokenMatches = effectiveTapisToken && pending.token && safeStringEqual(effectiveTapisToken, pending.token);
+      if (effectiveTapisToken && pending.tapisJobOwner && !ownerMatches) {
         logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
           task_id: pending.taskId,
           tapis_job_id: pending.tapisJobId,
@@ -187,10 +323,51 @@ module.exports = {
         }));
         return res.status(403).json({ error: "Tapis token does not own the pending task" });
       }
+      if (effectiveTapisToken && !pending.tapisJobOwner && pending.token && !tokenMatches) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          outcome: "rejected",
+          error_class: "auth_error"
+        }));
+        return res.status(403).json({ error: "Tapis token does not own the pending task" });
+      }
+      if (effectiveTapisToken && !pending.tapisJobOwner && !pending.token) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          outcome: "rejected",
+          error_class: "auth_error"
+        }));
+        return res.status(403).json({ error: "Pending task ownership is not configured" });
+      }
 
       let node = nodes.find(existing => existing.hostname() === registration.hostname && existing.port() === registration.port);
+      const nodeExisted = !!node;
+      const existingTapisJobId = node && node.getTapisJobId && node.getTapisJobId();
+      if (existingTapisJobId && existingTapisJobId !== pending.tapisJobId) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          outcome: "rejected",
+          error_class: "validation_error"
+        }));
+        return res.status(409).json({ error: "Node is already assigned to another Tapis task" });
+      }
+
+      if (typeof provider.claimPendingTask === 'function' && !provider.claimPendingTask(pending)) {
+        logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+          task_id: pending.taskId,
+          tapis_job_id: pending.tapisJobId,
+          outcome: "rejected",
+          error_class: "conflict"
+        }));
+        return res.status(409).json({ error: "Tapis task registration is already in progress" });
+      }
+
       if (!node) node = nodes.addUnique(registration.hostname, registration.port, registration.nodeToken);
       if (!node) {
+        if (typeof provider.releasePendingTask === 'function') provider.releasePendingTask(pending);
         logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
           task_id: pending.taskId,
           tapis_job_id: pending.tapisJobId,
@@ -201,16 +378,25 @@ module.exports = {
       }
 
       node.setTapisJob(pending.tapisJobId);
-      Object.assign(node.nodeData, pending.registrationMeta || {}, registration.metadata, {
-        nodeReady: registration.nodeReady
+      const registrationMetadata = Object.assign({}, pending.registrationMeta || {}, registration.metadata);
+      delete registrationMetadata.tapisJobOwner;
+      delete registrationMetadata.tapisJobOwnerTenant;
+      Object.assign(node.nodeData, registrationMetadata, {
+        nodeReady: registration.nodeReady,
+        tapisJobOwner: pending.tapisJobOwner || validatedIdentity.username,
+        tapisJobOwnerTenant: pending.tapisJobOwnerTenant || validatedIdentity.tenantId
       });
-      await nodes.saveToDisk();
 
+      let nodeWasAdded = false;
+      let taskSubmitted = false;
       try {
+        nodeWasAdded = !nodeExisted;
+        await nodes.saveToDisk();
         await submitPendingTask(pending, node);
+        taskSubmitted = true;
         await routetable.add(pending.taskId, node, pending.token);
         await tasktable.delete(pending.taskId);
-        provider.consumePendingTask(registration.tapisJobUuid || registration.registrationUuid);
+        provider.consumePendingTask(pending.taskId);
         if (pending.tmpPath) utils.rmdir(pending.tmpPath);
 
         logHandoffEvent(logger, "webhook_completed", {
@@ -226,9 +412,15 @@ module.exports = {
           nodeId: nodes.all().indexOf(node) + 1,
           tapisJobUuid: pending.tapisJobId,
           taskUuid: pending.taskId,
-          authMethod
+          authMethod,
+          registrationMode: pendingMatchMode === 'user' ? 'user-bound' : 'identifier-bound'
         });
       } catch (error) {
+        if (typeof provider.releasePendingTask === 'function') provider.releasePendingTask(pending);
+        if (nodeWasAdded && !taskSubmitted) {
+          nodes.remove(node);
+          await nodes.saveToDisk();
+        }
         logHandoffEvent(logger, "webhook_failed", {
           task_id: pending.taskId,
           tapis_job_id: pending.tapisJobId,
@@ -267,9 +459,9 @@ module.exports = {
         }
 
         const claims = decodeJwtPayload(effectiveTapisToken);
-        const username = tapisClaim(claims, 'username', 'user');
-        const tenantId = tapisClaim(claims, 'tenant_id', 'tenantId');
-        if (!username) return res.status(401).json({ error: 'Tapis JWT identity is missing' });
+        const username = claims && claims['tapis/username'];
+        const tenantId = claims && claims['tapis/tenant_id'];
+        if (!username || !tenantId) return res.status(401).json({ error: 'Tapis JWT identity is missing' });
 
         identity = {
           username: String(username),

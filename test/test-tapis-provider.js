@@ -2,6 +2,15 @@ const assert = require('assert');
 const TapisProvider = require('../libs/asr-providers/tapis');
 const logger = require('../libs/logger');
 
+const makeJwt = (username, tenant = 'tacc') => {
+    const payload = Buffer.from(JSON.stringify({
+        'tapis/username': username,
+        'tapis/tenant_id': tenant,
+        exp: Math.floor(Date.now() / 1000) + 300
+    })).toString('base64url');
+    return `header.${payload}.signature`;
+};
+
 (async () => {
     const provider = new TapisProvider({
         tapis: { baseUrl: 'https://example.tapis.io', tenantId: 'tacc' },
@@ -149,14 +158,20 @@ const logger = require('../libs/logger');
         logger.warn = originalWarn;
     }
 
+    const ownerToken = makeJwt('owner');
     provider.validateToken = async () => true;
     provider.submitJobWithoutData = async () => ({
         primaryJobId: 'tapis-job-2',
         submittedJobs: [{ tapisJobId: 'tapis-job-2', jobName: 'clusterodx-task' }]
     });
-    const pendingNode = await provider.createNode({}, 50, 'test-token', 'clusterodx-task', { aborted: false }, [], ['image.jpg'], '/tmp/task', 'cluster-task-1');
+    const pendingNode = await provider.createNode({}, 50, ownerToken, 'clusterodx-task', { aborted: false }, [], ['image.jpg'], '/tmp/task', 'cluster-task-1');
     assert.strictEqual(pendingNode, null);
     assert.strictEqual(provider.findPendingTask('tapis-job-2').taskId, 'cluster-task-1');
+    assert.strictEqual(provider.findPendingTask('tapis-job-2').nodeUser, 'owner@tacc');
+    assert.strictEqual(provider.findPendingTaskByUser({ username: 'owner', tenantId: 'tacc' }).task.taskId, 'cluster-task-1');
+    assert.strictEqual(provider.claimPendingTask(provider.findPendingTask('cluster-task-1')), true);
+    assert.strictEqual(provider.claimPendingTask(provider.findPendingTask('cluster-task-1')), false);
+    assert.strictEqual(provider.releasePendingTask(provider.findPendingTask('cluster-task-1')), true);
     assert.strictEqual(provider.findPendingTask('cluster-task-1').tapisJobId, 'tapis-job-2');
     assert.strictEqual(provider.consumePendingTask('tapis-job-2').taskId, 'cluster-task-1');
     assert.strictEqual(provider.findPendingTask('cluster-task-1'), null);

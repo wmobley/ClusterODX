@@ -134,10 +134,13 @@ NodeODX, then adds the route and removes the pending task entry only after a
 successful handoff.
 The token is never written to the ASR configuration or log messages.
 
-Worker registration requires either the request-scoped Tapis bearer token or a
-configured shared secret. Set the latter with `registration-secret` in the
-ClusterODX configuration, or with `worker.registrationSecret` in the Tapis ASR
-configuration. UUIDs and owner fields are metadata, not authentication.
+Ordinary `role: "worker"` registration requires either the request-scoped Tapis
+bearer token or a configured shared secret. Set the latter with
+`registration-secret` in the ClusterODX configuration, or with
+`worker.registrationSecret` in the Tapis ASR configuration. Task-bound primary
+registration always requires a validated Tapis bearer so the pending task can
+be matched to its tenant-qualified owner. UUIDs and owner fields are metadata,
+not authentication.
 
 NodeODX shutdown uses `POST /webhook/deregister-node` with the same request-scoped
 Tapis bearer token. The preferred payload is the `nodeId` returned by registration;
@@ -231,9 +234,13 @@ the worker. It should be kept private.
 
 The admin registration payload includes `hostname`, `port`, `token`, `uuid`,
 `tapisJobUuid`, `nodeReady`, and worker metadata. ClusterODX authenticates the
-bearer against the pending task, forwards the task to NodeODX, and only then
-consumes the pending registration. Worker-role callbacks are treated as
-ordinary node registrations and do not claim a pending Tapis task.
+bearer as a Tapis user. It first uses the UUID fields as correlation hints, then
+falls back to the authenticated user's pending task when the UUIDs differ. A
+single pending task may be claimed this way; if the user has multiple pending
+tasks, the worker must provide a matching correlation UUID. The bearer must
+belong to the task owner, but it does not have to be byte-for-byte identical to
+the token used to submit the job. Worker-role callbacks are treated as ordinary
+user-owned node registrations and do not claim a pending Tapis task.
 
 This adapter has local contract coverage, but no live Tapis submission or
 multi-node registration has been run from this checkout. Keep it disabled for
@@ -246,5 +253,5 @@ Run the local contract tests with:
 for test_file in test/*.js; do node "$test_file" || exit 1; done
 ```
 
-The repository's existing `npm test` script is still a placeholder and is not used by this
-contract-test command.
+The repository's `npm test` script runs the registered contract and regression tests. The
+loop above remains useful when running an individual test file that is not in the script.

@@ -82,6 +82,44 @@ const mappingDefault = (mapping, key, fallback) => {
     return value === undefined || value === null || value === '' ? fallback : value;
 };
 
+const extractUserFromToken = token => {
+    if (!token || typeof token !== 'string') return null;
+
+    try {
+        const parts = token.split('.');
+        if (parts.length !== 3) return null;
+        const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+        const username = claims['tapis/username'];
+        const tenantId = claims['tapis/tenant_id'];
+        if (!username || !tenantId) return null;
+
+        return {
+            username: String(username),
+            tenantId: String(tenantId),
+            fullUser: `${username}@${tenantId}`
+        };
+    } catch (_error) {
+        return null;
+    }
+};
+
+const sameUser = (pending, identity) => {
+    if (!pending || !identity) return false;
+    const owner = pending.tapisJobOwner || pending.nodeUser;
+    if (!owner) return false;
+
+    const normalizedOwner = String(owner).trim().toLowerCase();
+    const normalizedUsername = String(identity.username).trim().toLowerCase();
+    const normalizedTenant = String(identity.tenantId || '').trim().toLowerCase();
+    const normalizedOwnerTenant = String(pending.tapisJobOwnerTenant || '').trim().toLowerCase();
+    if (!normalizedOwnerTenant || !normalizedTenant) return false;
+    const ownerMatches = normalizedOwner.includes('@')
+        ? normalizedOwner === `${normalizedUsername}@${normalizedTenant}`
+        : normalizedOwner === normalizedUsername;
+
+    return ownerMatches && (!normalizedOwnerTenant || normalizedOwnerTenant === normalizedTenant);
+};
+
 const buildWorkerEnvVariables = (configuredEnv, tapisToken) => {
     const envVariables = Array.isArray(configuredEnv) ? configuredEnv : [];
 
@@ -317,6 +355,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         if (!this.canHandle(imagesCount)) throw new Error(`Cannot handle ${imagesCount} images.`);
 
         await this.validateToken(token);
+        const identity = extractUserFromToken(token);
         const submission = await this.submitJobWithoutData(token, hostname, imagesCount, taskOptions);
         if (status && status.aborted) {
             await this.cancelJob(token, submission.primaryJobId);
@@ -333,6 +372,9 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             tmpPath,
             pathImport,
             token,
+            nodeUser: identity ? identity.fullUser : null,
+            tapisJobOwner: identity ? identity.username : null,
+            tapisJobOwnerTenant: identity ? identity.tenantId : null,
             submittedJobs: submission.submittedJobs
         };
         this.pendingTasks.set(hostname, pending);
@@ -344,6 +386,31 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     findPendingTask(identifier) {
         if (!identifier) return null;
         return this.pendingTasks.get(identifier) || null;
+    }
+
+    findPendingTaskByUser(identity) {
+        if (!identity) return { task: null, count: 0 };
+
+        const uniqueTasks = [...new Set(this.pendingTasks.values())];
+        const matches = uniqueTasks.filter(task => sameUser(task, identity));
+        return {
+            task: matches.length === 1 ? matches[0] : null,
+            count: matches.length
+        };
+    }
+
+    claimPendingTask(pending) {
+        if (!pending || pending.registrationClaimed) return false;
+        pending.registrationClaimed = true;
+        pending.registrationClaimedAt = Date.now();
+        return true;
+    }
+
+    releasePendingTask(pending) {
+        if (!pending) return false;
+        delete pending.registrationClaimed;
+        delete pending.registrationClaimedAt;
+        return true;
     }
 
     consumePendingTask(identifier) {

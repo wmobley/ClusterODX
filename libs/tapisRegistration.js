@@ -31,6 +31,7 @@ const normalizeRegistration = (payload = {}) => {
         registrationUuid: typeof payload.registrationUuid === 'string' ? payload.registrationUuid : null,
         tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null,
         nodeReady: !!payload.nodeReady,
+        role: typeof payload.role === 'string' ? payload.role : null,
         metadata: {
             childIndex: payload.childIndex !== undefined ? payload.childIndex : null,
             role: payload.role || null,
@@ -40,9 +41,7 @@ const normalizeRegistration = (payload = {}) => {
             jobCount: payload.jobCount !== undefined ? payload.jobCount : null,
             replicasPerJob: payload.replicasPerJob !== undefined ? payload.replicasPerJob : null,
             registrationUuid: typeof payload.registrationUuid === 'string' ? payload.registrationUuid : null,
-            tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null,
-            tapisJobOwner: typeof payload.tapisJobOwner === 'string' ? payload.tapisJobOwner : null,
-            tapisJobOwnerTenant: typeof payload.tapisJobOwnerTenant === 'string' ? payload.tapisJobOwnerTenant : null
+            tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null
         }
     };
 };

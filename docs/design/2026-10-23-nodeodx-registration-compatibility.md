@@ -32,6 +32,7 @@ Restore the Tapis application contract used by the previous NodeODM deployment a
    - remove the node and persist node state;
    - return JSON success, `400` for missing identification, `401` for missing/invalid credentials, `403` for ownership failure, and `404` for an unknown node.
 3. Add focused tests for the new route and update Tapis deployment documentation with the packaged app contract and lifecycle endpoints.
+4. Preserve the original ClusterODM registration contract for explicitly marked legacy workers. A request with `role: "worker"` will register an ordinary node after successful JWT or registration-secret authentication, even when no pending Tapis task exists. Primary registrations will use UUIDs as correlation hints and fall back to the authenticated Tapis user's pending task when the UUIDs differ. If multiple pending tasks belong to that user, the request must include a matching correlation UUID.
 
 ## Files likely affected
 
@@ -73,6 +74,7 @@ ClusterODX request JWT → Tapis job `parameterSet.envVariables.TAPIS_ACCESS_TOK
 - **Restore owner-only authentication:** rejected because user IDs are forgeable and the current ClusterODX design intentionally requires proof of possession.
 - **Configure a shared registration secret:** retained as a supported fallback, but not the primary Tapis app path because the ClusterODX submission already has the request-scoped JWT.
 - **Remove NodeODX deregistration:** rejected because it leaves stale worker nodes and diverges from the previous lifecycle behavior.
+- **Require every registration to match a pending Tapis task:** rejected because it breaks the original standalone worker registration contract and prevents manual/legacy workers from joining the cluster.
 
 ## Test plan
 
@@ -81,6 +83,7 @@ ClusterODX request JWT → Tapis job `parameterSet.envVariables.TAPIS_ACCESS_TOK
 - Run existing ClusterODX test suite and `git diff --check`.
 - Rebuild the NodeODX ZIP and run `unzip -tq`.
 - Use a dry-run/local HTTP test for the deregistration endpoint; do not call live Tapis write APIs during tests.
+- Add local webhook tests proving that explicit legacy workers register successfully without a pending task, while task-bound registrations still return `404` when no pending task matches.
 
 ## Documentation plan
 
@@ -102,6 +105,8 @@ Deploy the new ClusterODX code first, publish the new NodeODX ZIP/app version se
 - Keep the NodeODX node token separate from the Tapis bearer token.
 - Preserve `tapisJobOwner`, `tapisJobOwnerTenant`, and registration UUID metadata on registered nodes so JWT deregistration can enforce ownership and support stable identifier lookup.
 - Keep the deregistration response as JSON `200` for compatibility with the NodeODX cleanup client; malformed, unauthorized, forbidden, and unknown-node cases use `400`, `401`, `403`, and `404` respectively.
+- Use the validated Tapis user, rather than the raw task UUID or exact bearer string, as the ownership boundary for task-bound registration. UUIDs remain correlation hints and are required only to disambiguate multiple pending tasks for the same user.
+- Require canonical Tapis username and tenant claims for JWT registration, reject shared-secret task-bound claims, and fail closed for ownerless pending records. Claim pending tasks synchronously before handoff and release the claim when submission fails.
 
 ## Implementation result
 
@@ -117,6 +122,22 @@ Deploy the new ClusterODX code first, publish the new NodeODX ZIP/app version se
 - **Alternatives rejected:** Restoring owner-only registration would weaken the existing ClusterODM-compatible authentication contract; relying on the historical macro is incompatible with the current Tapis service.
 - **User feedback:** User asked to align ClusterODX with the old ClusterODM behavior and confirm it works.
 - **Impact on implementation:** ClusterODX provider job construction, NodeODX app JSON, tests, deployment docs, and local ZIP packaging are updated. Launch-file archiving is disabled to reduce token retention.
+
+### 2026-10-26 — Restore explicit legacy worker registration
+
+- **Decision:** Treat `role: "worker"` as the compatibility signal for the original ordinary-node registration path.
+- **Reason:** The public ClusterODX endpoint replaced the old ClusterODM endpoint but rejected standalone worker registrations with `No pending Tapis task matches this registration`.
+- **Security boundary:** Legacy registration still requires a validated Tapis bearer token or configured registration secret. A valid token does not bypass authentication; it only selects the registration flow after authentication succeeds.
+- **User feedback:** User confirmed that the public endpoint should retain the original ClusterODM behavior.
+- **Implementation result:** Added the exact `role: "worker"` compatibility branch, trusted JWT owner metadata, duplicate-owner protection, protection against reclassifying Tapis-managed nodes, and focused webhook regression coverage. The focused registration tests and full `npm test` suite pass.
+
+### 2026-10-26 — Match pending primary registrations by user
+
+- **Decision:** Match a task-bound registration by the authenticated Tapis user when the supplied task or registration UUID is not present in the in-memory pending-task index.
+- **Reason:** The previous ClusterODM implementation tracked `nodeUser` and used owner matching as a compatibility fallback. ClusterODX was returning `404` for valid jobs whenever Tapis/NodeODX emitted a different correlation UUID.
+- **Security boundary:** The JWT is validated through Tapis and its username/tenant must match the pending task owner. The caller cannot claim another user's task. Exact bearer-token equality is retained only for legacy pending records that have no owner metadata.
+- **Ambiguity rule:** If one user has multiple pending tasks and no UUID matches, ClusterODX returns `409` instead of guessing.
+- **Implementation result:** Pending Tapis records now retain user ownership metadata, ClusterODX performs owner-based fallback matching, and provider/webhook tests cover the behavior.
 
 ## User feedback / decisions
 
