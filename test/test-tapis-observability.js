@@ -50,6 +50,40 @@ const reset = () => { messages.length = 0; };
     assert.strictEqual(events()[1].http_status, 200);
 
     reset();
+    axios.post = async () => ({ status: 200, data: { uuid: 'node-task-id' } });
+    const mismatched = await submitPendingTask({
+        taskId: 'cluster-task-id',
+        tapisJobId: 'tapis-job-mismatch',
+        pathImport: '/corral/webodm/media/project/images'
+    }, node);
+    assert.deepStrictEqual(mismatched, { taskUuid: 'cluster-task-id', usedImportPath: true });
+    assert.strictEqual(events()[1].outcome, 'success');
+
+    reset();
+    axios.post = async () => ({ status: 200, data: {} });
+    const missingResponseUuid = await submitPendingTask({
+        taskId: 'cluster-task-without-response-uuid',
+        tapisJobId: 'tapis-job-missing-response-uuid',
+        pathImport: '/corral/webodm/media/project/images'
+    }, node);
+    assert.deepStrictEqual(missingResponseUuid, {
+        taskUuid: 'cluster-task-without-response-uuid',
+        usedImportPath: true
+    });
+    assert.strictEqual(events()[1].outcome, 'success');
+
+    reset();
+    axios.post = async () => ({ status: 200, data: { error: 'Invalid set-uuid' } });
+    await assert.rejects(() => submitPendingTask({
+        taskId: 'task-rejected-by-nodeodx',
+        tapisJobId: 'tapis-job-rejected',
+        pathImport: '/corral/webodm/media/project/images'
+    }, node), /NodeODX rejected task: Invalid set-uuid/);
+    assert.strictEqual(events()[1].outcome, 'failure');
+    assert.strictEqual(events()[1].error_class, 'validation_error');
+    assert.strictEqual(events()[1].http_status, 200);
+
+    reset();
     axios.post = async () => {
         const error = new Error('private response body must not be logged');
         error.response = { status: 502, data: 'private response body' };

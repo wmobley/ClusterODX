@@ -212,6 +212,11 @@ uploaded files still send those files. The worker must be able to access the
 directory and allow it in its configured shared import roots. Adding an existing
 worker does not reassign a task already waiting for a Tapis registration.
 
+Task control requests (`/task/cancel`, `/task/restart`, `/task/remove`) accept
+JSON, URL-encoded forms, or multipart forms with a string `uuid` field. Routed
+requests retain their original body and content type when forwarded to the
+worker. Malformed JSON or unsupported content types return HTTP 400.
+
 It is also possible to pre-populate nodes using JSON. If starting ClusterODX from apptainer or docker, the relevant JSON is available at `docker/data/nodes.json`. Contents might look similar to the following:
 
 ```javascript

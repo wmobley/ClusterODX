@@ -14,7 +14,7 @@ const makeJwt = (username, tenant = 'tacc') => {
 (async () => {
     const provider = new TapisProvider({
         tapis: { baseUrl: 'https://example.tapis.io', tenantId: 'tacc' },
-        app: { appId: 'nodeodx-ls6', appVersion: '1.0.17' },
+        app: { appId: 'nodeodx-ls6', appVersion: '1.0.18' },
         system: { executionSystemId: 'ls6', archiveSystemId: 'ls6', logicalQueue: 'normal', queueFilter: ['normal', 'gpu-a100-small'] },
         scheduler: { defaultAllocation: 'PT2050-DataX' },
         job: {
@@ -73,7 +73,7 @@ const makeJwt = (username, tenant = 'tacc') => {
     assert.match(accepted, /"tapisJobId":"tapis-job-1"/);
     assert.doesNotMatch(infoMessages.join('\n'), /test-token/);
     assert.strictEqual(payload.appId, 'nodeodx-ls6');
-    assert.strictEqual(payload.appVersion, '1.0.17');
+    assert.strictEqual(payload.appVersion, '1.0.18');
     assert.strictEqual(payload.execSystemLogicalQueue, 'normal');
     assert.strictEqual(payload.nodeCount, 2);
     assert.strictEqual(payload.coresPerNode, 64);

@@ -84,14 +84,24 @@ const submitPendingTask = async (pending, node) => {
             maxContentLength: Infinity
         });
         httpStatus = response && response.status;
-        const responseUuid = response && response.data && response.data.uuid;
-        if (!responseUuid) {
-            const error = new Error('NodeODX response missing task UUID');
+        const responseData = response && response.data && typeof response.data === 'object'
+            ? response.data
+            : {};
+        if (responseData.error) {
+            const detail = typeof responseData.error === 'string'
+                ? responseData.error.slice(0, 500)
+                : 'request rejected';
+            const error = new Error(`NodeODX rejected task: ${detail}`);
             error.odxErrorClass = 'validation_error';
             throw error;
         }
-        if (taskHeaderId && responseUuid !== taskHeaderId) {
-            const error = new Error(`NodeODX returned mismatched UUID ${responseUuid}`);
+
+        const responseUuid = responseData.uuid;
+        if (taskHeaderId && responseUuid && responseUuid !== taskHeaderId) {
+            logger.warn(`NodeODX returned task UUID ${responseUuid}; using pending task UUID ${taskHeaderId}`);
+        }
+        if (!taskHeaderId && !responseUuid) {
+            const error = new Error('NodeODX response missing task UUID');
             error.odxErrorClass = 'validation_error';
             throw error;
         }

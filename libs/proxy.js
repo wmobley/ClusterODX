@@ -478,58 +478,70 @@ module.exports = {
                     let taskId = null;
                     let body = await getReqBody(req);
 
-                    const busboy = new Busboy({ headers: req.headers });
-                    busboy.on('field', function(fieldname, val, fieldnameTruncated, valTruncated) {
-                        if (fieldname === 'uuid'){
-                            taskId = val;
+                    try {
+                        const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+                        if (contentType === 'application/json') {
+                            const payload = JSON.parse(body);
+                            taskId = payload && payload.uuid;
+                        } else {
+                            taskId = await new Promise((resolve, reject) => {
+                                const busboy = new Busboy({ headers: req.headers });
+                                let uuid = null;
+                                busboy.on('field', (fieldname, value) => {
+                                    if (fieldname === 'uuid') uuid = value;
+                                });
+                                busboy.on('finish', () => resolve(uuid));
+                                busboy.on('error', reject);
+                                utils.stringToStream(body).on('error', reject).pipe(busboy);
+                            });
                         }
-                    });
-                    busboy.on('finish', async function() {
-                        if (taskId){
-                            concurrencyMonitor.decreaseCount(query.token);
+                    } catch (_error) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'Invalid task control request body' }));
+                        return;
+                    }
+                    if (typeof taskId === 'string' && taskId){
+                        concurrencyMonitor.decreaseCount(query.token);
 
-                            let node = await routetable.lookupNode(taskId);
-                            if (node){
-                                overrideRequest(req, node, query, pathname);
-                                proxy.web(req, res, { 
-                                        target: node.proxyTargetUrl(),
-                                        buffer: utils.stringToStream(body)
-                                    });
-                            }else{
-                                const taskTableEntry = await tasktable.lookup(taskId);
-                                if (taskTableEntry && taskTableEntry.taskInfo){
-                                    if (pathname === '/task/cancel' || pathname === '/task/remove'){
-                                        if (taskTableEntry.abort){
-                                            taskTableEntry.abort();
-                                            taskTableEntry.abort = null;
-                                            logger.info(`Task ${taskId} aborted via ${pathname}`);
-                                        }
-                                        
-                                        utils.rmdir(`tmp/${taskId}`);
-
-                                        if (pathname === '/task/remove'){
-                                            await tasktable.delete(taskId);
-                                        }
-
-                                        if (pathname === '/task/cancel'){
-                                            taskTableEntry.taskInfo.status.code = statusCodes.CANCELED;
-                                            await tasktable.add(taskId, taskTableEntry, query.token);
-                                        }
-
-                                        json(res, { success: true });
-                                    }else{
-                                        json(res, { error: `Action not supported. Please create a new task.` });
-                                    }
-                                }else{
-                                    json(res, { error: `Invalid route for taskId ${taskId}, no nodes in routing table.`});
-                                }
-                            }
+                        let node = await routetable.lookupNode(taskId);
+                        if (node){
+                            overrideRequest(req, node, query, pathname);
+                            proxy.web(req, res, {
+                                target: node.proxyTargetUrl(),
+                                buffer: utils.stringToStream(body)
+                            });
                         }else{
-                            json(res, { error: `No uuid found in ${pathname}`});
-                        }
-                    });
+                            const taskTableEntry = await tasktable.lookup(taskId);
+                            if (taskTableEntry && taskTableEntry.taskInfo){
+                                if (pathname === '/task/cancel' || pathname === '/task/remove'){
+                                    if (taskTableEntry.abort){
+                                        taskTableEntry.abort();
+                                        taskTableEntry.abort = null;
+                                        logger.info(`Task ${taskId} aborted via ${pathname}`);
+                                    }
 
-                    utils.stringToStream(body).pipe(busboy);
+                                    utils.rmdir(`tmp/${taskId}`);
+
+                                    if (pathname === '/task/remove'){
+                                        await tasktable.delete(taskId);
+                                    }
+
+                                    if (pathname === '/task/cancel'){
+                                        taskTableEntry.taskInfo.status.code = statusCodes.CANCELED;
+                                        await tasktable.add(taskId, taskTableEntry, query.token);
+                                    }
+
+                                    json(res, { success: true });
+                                }else{
+                                    json(res, { error: `Action not supported. Please create a new task.` });
+                                }
+                            }else{
+                                json(res, { error: `Invalid route for taskId ${taskId}, no nodes in routing table.`});
+                            }
+                        }
+                    }else{
+                        json(res, { error: `No uuid found in ${pathname}`});
+                    }
                 }else if (req.method === 'GET' && pathname === '/task/list') {
                     const taskIds = {};
                     const taskTableEntries = await tasktable.findByToken(query.token);
@@ -655,7 +667,7 @@ module.exports = {
                     }
                 }
             }catch(e){
-                logger.warn(`Uncaught exception: ${e}`);
+                logger.warn(`Uncaught exception (${req.method} ${url.parse(req.url).pathname}): ${e}`);
                 json(res, { error: 'exception'});
                 if (config.debug) throw e;
             }

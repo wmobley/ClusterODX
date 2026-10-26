@@ -20,7 +20,7 @@ runtime by the request/authentication path rather than stored in this file.
   },
   "app": {
     "appId": "nodeodx-ls6",
-    "appVersion": "1.0.17"
+    "appVersion": "1.0.18"
   },
   "system": {
     "executionSystemId": "ls6",
@@ -98,7 +98,7 @@ before restarting ClusterODX:
 {
   "app": {
     "appId": "nodeodx-ls6",
-    "appVersion": "1.0.17"
+    "appVersion": "1.0.18"
   },
   "job": {
     "appArgs": [
@@ -133,6 +133,14 @@ ClusterODX validates the request-scoped Tapis token, forwards the staged task to
 NodeODX, then adds the route and removes the pending task entry only after a
 successful handoff.
 The token is never written to the ASR configuration or log messages.
+
+During the handoff, the pending ClusterODX task UUID is authoritative. The
+worker's `/task/new` response may omit `uuid` or return a different correlation
+UUID; when the HTTP request succeeds, ClusterODX logs the mismatch and continues
+using its pending UUID, matching the previous ClusterODM behavior. An explicit
+NodeODX response containing an `error` field is still treated as a failed
+handoff and remains visible as `error_class: "validation_error"` in the
+structured log event.
 
 Ordinary `role: "worker"` registration requires either the request-scoped Tapis
 bearer token or a configured shared secret. Set the latter with

@@ -107,13 +107,21 @@ Deploy the new ClusterODX code first, publish the new NodeODX ZIP/app version se
 - Keep the deregistration response as JSON `200` for compatibility with the NodeODX cleanup client; malformed, unauthorized, forbidden, and unknown-node cases use `400`, `401`, `403`, and `404` respectively.
 - Use the validated Tapis user, rather than the raw task UUID or exact bearer string, as the ownership boundary for task-bound registration. UUIDs remain correlation hints and are required only to disambiguate multiple pending tasks for the same user.
 - Require canonical Tapis username and tenant claims for JWT registration, reject shared-secret task-bound claims, and fail closed for ownerless pending records. Claim pending tasks synchronously before handoff and release the claim when submission fails.
+- Treat the pending ClusterODX task UUID as authoritative during `/task/new` handoff. Accept a successful NodeODX response with a missing or mismatched response UUID, while still rejecting an explicit response `error`.
+- Keep NodeODX alive after registration rejection by default so operators can inspect and retry the worker; retain `NODEODX_REQUIRE_REGISTRATION=1` as an opt-in strict mode.
 
 ## Implementation result
 
-- Packaged NodeODX app version `1.0.17` keeps task cleanup disabled with `NODEODX_CLEANUP_TASKS_AFTER=0` and adds the shared Corral import root; ClusterODX injects the actual request JWT into each Tapis job as `TAPIS_ACCESS_TOKEN`.
+- Packaged NodeODX app version `1.0.18` keeps task cleanup disabled with `NODEODX_CLEANUP_TASKS_AFTER=0` and adds the shared Corral import root; ClusterODX injects the actual request JWT into each Tapis job as `TAPIS_ACCESS_TOKEN`.
 - ClusterODX now exposes authenticated `POST /webhook/deregister-node`, removes the node from persisted state, and asks the Tapis provider to terminate auto-spawned jobs when applicable.
 - Added focused webhook coverage and included it in `npm test`.
 - Rebuilt `nodeodx-ls6.zip` locally with `SKIP_UPLOAD=1`; live Tapis app registration and upload remain deployment steps.
+
+### 2026-10-26 — Preserve workers after handoff rejection
+
+- **Decision:** Follow the previous ClusterODM `/task/new` contract: use the pending task UUID even when NodeODX omits or changes its response UUID, but fail on an explicit NodeODX error payload.
+- **Reason:** ClusterODX was converting an HTTP 200 NodeODX response into `error_class: "validation_error"` solely because the response UUID differed or was absent. This prevented testing the live worker and diverged from the old implementation, which warned and continued.
+- **Operational behavior:** NodeODX registration remains nonfatal by default. The launcher writes registration diagnostics and waits with NodeODX running; `NODEODX_REQUIRE_REGISTRATION=1` restores fail-fast behavior for deployments that require a registered worker.
 
 ### 2026-10-23 — Inject the request JWT at job submission
 
