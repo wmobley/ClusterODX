@@ -40,6 +40,12 @@ Logout or rejected authentication clears it. It is sent as a bearer token for
 each administrative API request. Set `admin-web-allowed-tenants` and `admin-web-allowed-users` to
 restrict which Tapis identities may sign in.
 
+The admin dashboard lists tracked tasks as well as registered nodes. Submitted
+Tapis tasks appear while waiting for worker registration; routed tasks show their
+worker assignment. Use Refresh or enable five-second auto-refresh to update both
+lists. Assignment describes the local route, not processing progress. Pending
+task records are in memory and do not survive a ClusterODX restart.
+
 The administrative CLI on port 8080 remains password-protected. Set
 `--admin-pass` (or `admin-pass` in the configuration) for the CLI. The same
 password also enables the web interface when `admin-web-use-tapis-jwt` is false.

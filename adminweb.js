@@ -25,6 +25,7 @@ const asrProvider = require("./libs/asrProvider");
 const config = require("./config");
 const tasktable = require("./libs/tasktable");
 const routetable = require("./libs/routetable");
+const { listTasks } = require("./libs/adminTasks");
 const utils = require("./libs/utils");
 const { extractBearerToken, normalizeRegistration } = require("./libs/tapisRegistration");
 const { submitPendingTask } = require("./libs/tapisWorker");
@@ -406,6 +407,11 @@ module.exports = {
       }
     };
 
+    app.use("/r/task/list", (_req, res, next) => {
+      res.set("Cache-Control", "no-store");
+      next();
+    });
+
     if (useTapisJwt) {
       app.use(express.static("public"));
 
@@ -461,6 +467,16 @@ module.exports = {
     app.get("/r/node/list", (req, res) => {
       const list = nodes.all();
       res.json(list.map((node) => nodeToJson(node)));
+    });
+
+    app.get("/r/task/list", async (_req, res) => {
+      res.set('Cache-Control', 'no-store');
+      try {
+        res.json(await listTasks({ tasktable, routetable, provider: asrProvider.get() }));
+      } catch (_error) {
+        logger.warn('Cannot build admin task list');
+        res.status(500).json({ error: 'Unable to load tasks' });
+      }
     });
 
     app.delete("/r/node", async (req, res) => {

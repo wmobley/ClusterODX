@@ -1,10 +1,13 @@
 const SESSION_KEY = "clusterodx.admin.jwt";
 let adminToken = null;
 let validationAttempt = 0;
+let sessionVersion = 0;
 
 export const getAdminToken = () => adminToken;
+export const getAdminSessionVersion = () => sessionVersion;
 
 export const setAdminToken = (token) => {
+  sessionVersion++;
   adminToken = token;
   try { window.sessionStorage.setItem(SESSION_KEY, token); } catch (_) {}
 };
@@ -12,6 +15,7 @@ export const setAdminToken = (token) => {
 export const cancelAdminValidation = () => { validationAttempt++; };
 
 export const clearAdminToken = () => {
+  sessionVersion++;
   cancelAdminValidation();
   adminToken = null;
   try { window.sessionStorage.removeItem(SESSION_KEY); } catch (_) {}

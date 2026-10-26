@@ -162,6 +162,33 @@ identities. The administrative CLI remains protected by `admin-pass`. Set
 `admin-web-use-tapis-jwt: false` to use that password for the web interface as
 well. State-changing cross-origin requests are rejected.
 
+## Admin task visibility
+
+Authenticated administrators can use `GET /r/task/list` on the admin web service
+to list all locally tracked tasks. It uses the same JWT/basic authentication as
+`/r/node/list`; this is a cluster-wide administrative view. Responses are arrays
+of summaries with `uuid`, `name`, `source`, `state`, `statusCode`, `imagesCount`,
+`dateCreated`, `accessed`, `tapisJobId`, and `node` (`{hostname, port}` or null).
+Dates are epoch milliseconds; unavailable metadata is null and missing names use
+the UUID. Credentials, processing options, filesystem paths, and console output
+are excluded. Responses use `Cache-Control: no-store`.
+
+The task table updates at login, on Refresh, and with the optional five-second
+auto-refresh. `submitting` means a local running task has no accepted Tapis UUID
+yet; `waiting_registration` means the submitted job has a pending handoff;
+`assigned` means a route exists. Neither waiting nor assigned confirms the
+scheduler state or actual processing progress. Queued and locally recorded
+terminal states are shown as such. A terminal local record takes precedence
+over waiting/assigned observations. The endpoint makes no live Tapis or worker
+requests, so routed task metadata and processing status can be unavailable.
+
+Task rows exist only for local tasktable/routetable records: pending submissions
+are process-local and lost on restart, and routes follow existing retention and
+node-removal rules. This does not discover historical Tapis jobs. A pending
+job can remain waiting if its callback URL/token or worker startup is incorrect.
+Check the worker output for registration failures; configure the real ClusterODX
+callback arguments rather than assuming the default hostname targets this instance.
+
 ## Handoff observability
 
 Tapis job submission has a 60-second HTTP request timeout. A successful response

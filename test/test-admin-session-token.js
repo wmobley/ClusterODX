@@ -66,6 +66,16 @@ const fs = require('fs');
     assert.strictEqual(auth.getStartupToken(), '');
     assert.strictEqual(auth.getAdminToken(), null);
 
+    let resolveOldRequest;
+    auth.setAdminToken('old-request');
+    global.fetch = () => new Promise(resolve => { resolveOldRequest = resolve; });
+    const oldRequest = common.getFetch('/r/info');
+    auth.clearAdminToken();
+    auth.setAdminToken('new-session');
+    resolveOldRequest({ status: 401 });
+    await oldRequest;
+    assert.strictEqual(auth.getAdminToken(), 'new-session');
+
     Object.defineProperty(window, 'sessionStorage', { get() { throw new Error('blocked'); } });
     global.fetch = async () => ({ ok: true });
     assert.strictEqual(await auth.validateAdminToken('memory-only'), true);

@@ -1,5 +1,6 @@
 import { html, render } from "./lib/preact.html.mjs";
-import { useState, useEffect, useCallback } from "./lib/hooks.module.js";
+import { useState, useEffect, useCallback, useRef } from "./lib/hooks.module.js";
+import { TaskList } from "./component/taskList.mjs";
 import { NodeList } from "./component/nodeList.mjs";
 import { Header } from "./component/header.mjs";
 import { RefreshButton } from "./component/refreshButton.mjs";
@@ -17,15 +18,6 @@ const getNodesData = async () => {
   if (!res.ok) throw new Error("Unable to load ClusterODX nodes");
   return await res.json();
 };
-const useNodes = () => {
-  const [nodes, setNodes] = useState([]);
-  const getData = () => {
-    getNodesData().then((nextNodes) => setNodes(nextNodes)).catch(() => {});
-  };
-
-  return [nodes, getData];
-};
-
 const Login = ({ onAuthenticated }) => {
   const [token, setToken] = useState("");
   const [error, setError] = useState("");
@@ -102,61 +94,100 @@ const Login = ({ onAuthenticated }) => {
 
 export default function App() {
   const [info, setInfo] = useState({ name: "", version: "" });
-  const [nodes, getNodes] = useNodes();
+  const [nodes, setNodes] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [taskLoading, setTaskLoading] = useState(false);
+  const [taskError, setTaskError] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState({ isAutoRefresh: false });
+  const session = useRef({ active: false, generation: 0, request: 0 });
 
-  const [autoRefresh, setAutoRefresh] = useState({ isAutoRefresh: false, intervalHandler: null });
+  const loadDashboard = useCallback(async () => {
+    if (!session.current.active) return;
+    const generation = session.current.generation;
+    const request = ++session.current.request;
+    const isCurrent = () => session.current.active &&
+      generation === session.current.generation && request === session.current.request;
+    setTaskLoading(true);
+    const results = await Promise.allSettled([
+      getInfoData(),
+      getNodesData(),
+      getFetch("/r/task/list").then(async (response) => {
+        if (!response.ok) throw new Error("Unable to load tasks");
+        const rows = await response.json();
+        if (!Array.isArray(rows)) throw new Error("Invalid task list");
+        return rows;
+      }),
+    ]);
+    if (!isCurrent()) return;
+    if (results[0].status === "fulfilled") setInfo(results[0].value);
+    if (results[1].status === "fulfilled") setNodes(results[1].value);
+    if (results[2].status === "fulfilled") {
+      setTasks(results[2].value);
+      setTaskError("");
+    } else {
+      setTaskError("Unable to load tasks. Try refreshing; displayed tasks may be outdated.");
+    }
+    setTaskLoading(false);
+  }, []);
 
-  const loadDashboard = useCallback(() => {
-    getInfoData().then((infoData) => setInfo(infoData)).catch(() => {});
-    getNodes();
+  const resetDashboard = useCallback(() => {
+    session.current.active = false;
+    session.current.generation++;
+    setAuthenticated(false);
+    setAutoRefresh({ isAutoRefresh: false });
+    setInfo({ name: "", version: "" });
+    setNodes([]);
+    setTasks([]);
+    setTaskLoading(false);
+    setTaskError("");
+  }, []);
+
+  const onAuthenticated = useCallback(() => {
+    session.current.active = true;
+    session.current.generation++;
+    setAuthenticated(true);
   }, []);
 
   useEffect(() => {
-    const onAuthExpired = () => {
-      setAuthenticated(false);
-      setAutoRefresh({ isAutoRefresh: false, intervalHandler: null });
+    window.addEventListener("clusterodx-auth-expired", resetDashboard);
+    return () => window.removeEventListener("clusterodx-auth-expired", resetDashboard);
+  }, [resetDashboard]);
+
+  useEffect(() => {
+    if (!authenticated) return;
+    loadDashboard();
+    return () => {
+      session.current.active = false;
+      session.current.generation++;
     };
-    window.addEventListener("clusterodx-auth-expired", onAuthExpired);
-    return () => window.removeEventListener("clusterodx-auth-expired", onAuthExpired);
-  }, []);
-
-  useEffect(() => {
-    if (authenticated) loadDashboard();
   }, [authenticated, loadDashboard]);
 
   useEffect(() => {
-    if (autoRefresh.isAutoRefresh) {
-      const intervalHandler = setInterval(() => {
-        getNodes();
-      }, 5000);
-      setAutoRefresh({ ...autoRefresh, intervalHandler });
-    } else {
-      if (autoRefresh.intervalHandler > 0) {
-        clearInterval(autoRefresh.intervalHandler);
-        setAutoRefresh({ ...autoRefresh, intervalHandler: null });
-      }
-    }
-  }, [autoRefresh.isAutoRefresh]);
+    if (!authenticated || !autoRefresh.isAutoRefresh) return;
+    const interval = setInterval(loadDashboard, 5000);
+    return () => clearInterval(interval);
+  }, [authenticated, autoRefresh.isAutoRefresh, loadDashboard]);
 
   if (!authenticated) {
-    return html`<${Login} onAuthenticated=${() => setAuthenticated(true)} />`;
+    return html`<${Login} onAuthenticated=${onAuthenticated} />`;
   }
 
-  return html` <div class="container">
+  return html`<div class="container">
     <${Header}
       info=${info}
       onSignout=${() => {
         clearAdminToken();
-        setAuthenticated(false);
+        resetDashboard();
       }}
     />
-    <${NodeList} nodes=${nodes} getData=${getNodes} />
-
+    <${NodeList} nodes=${nodes} getData=${loadDashboard} />
     <div id="btn-area">
-      <${AddInstanceButton} getNodes=${getNodes} />
+      <${AddInstanceButton} getNodes=${loadDashboard} />
       <div style="flex-grow:1"></div>
+      <button class="btn btn-outline-primary mx-2" onClick=${loadDashboard}>Refresh</button>
       <${RefreshButton} autoRefresh=${autoRefresh} setAutoRefresh=${setAutoRefresh} />
     </div>
+    <${TaskList} tasks=${tasks} loading=${taskLoading} error=${taskError} />
   </div>`;
 }

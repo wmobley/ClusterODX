@@ -70,6 +70,22 @@ module.exports = {
         return null;
     },
 
+    // Detached admin snapshot: never expose credentials or extend task retention.
+    listSummaries: async function(){
+        const number = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+        return Object.entries(tasks || {}).map(([uuid, entry]) => {
+            const info = entry.obj && entry.obj.taskInfo || {};
+            return {
+                uuid,
+                name: typeof info.name === 'string' ? info.name : uuid,
+                statusCode: number(info.status && info.status.code),
+                imagesCount: number(info.imagesCount),
+                dateCreated: number(info.dateCreated),
+                accessed: number(entry.accessed)
+            };
+        });
+    },
+
     findByToken: async function(token){
         const result = {};
         for (let taskId in tasks){

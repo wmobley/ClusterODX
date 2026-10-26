@@ -1,4 +1,4 @@
-import { getAdminToken, clearAdminToken } from "./authToken.mjs";
+import { getAdminToken, getAdminSessionVersion, clearAdminToken } from "./authToken.mjs";
 export { setAdminToken, clearAdminToken } from "./authToken.mjs";
 
 const authenticatedHeaders = (headers = {}) => {
@@ -9,12 +9,13 @@ const authenticatedHeaders = (headers = {}) => {
 };
 
 const authenticatedFetch = async (url, options = {}) => {
+  const sessionVersion = getAdminSessionVersion();
   const response = await fetch(url, {
     ...options,
     credentials: "same-origin",
     headers: authenticatedHeaders(options.headers),
   });
-  if (response.status === 401) {
+  if (response.status === 401 && sessionVersion === getAdminSessionVersion()) {
     clearAdminToken();
     window.dispatchEvent(new Event("clusterodx-auth-expired"));
   }
