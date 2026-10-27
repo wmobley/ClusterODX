@@ -11,6 +11,18 @@ Pass an ASR JSON file with `--asr`. Keep the file private because it contains
 deployment details, even though the Tapis token itself must be supplied at
 runtime by the request/authentication path rather than stored in this file.
 
+The `/options` response merges the provider's queue, allocation, runtime, and
+node-count controls with the reference worker's processing options. Provider
+definitions take precedence for matching names, then user limits are applied.
+These controls remain available when workers register. Without a reference
+worker, the provider supplies the configured `nodeOptions` and Tapis controls.
+
+Task downloads are forwarded to the registered NodeODX worker using its node
+token. The Tapis Files API base URL is not an asset-storage redirect target.
+As in ClusterODM, online workers take precedence over storage redirects, and
+`--force-node-downloads` disables those redirects for all providers. Tapis
+downloads require the worker and its task assets to remain available.
+
 ```json
 {
   "provider": "tapis",

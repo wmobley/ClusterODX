@@ -81,6 +81,21 @@ module.exports = {
             }
         };
 
+        const withProviderOptions = async (baseOptions, token) => {
+            const provider = asrProvider.get();
+            if (!provider || typeof provider.getClusterOptions !== 'function') return baseOptions;
+
+            try {
+                const providerOptions = await provider.getClusterOptions(token);
+                if (!Array.isArray(providerOptions) || providerOptions.length === 0) return baseOptions;
+                const names = new Set(providerOptions.map(option => option.name));
+                return baseOptions.filter(option => !names.has(option.name)).concat(providerOptions);
+            } catch (error) {
+                logger.warn(`Could not append provider task options: ${error.message}`);
+                return baseOptions;
+            }
+        };
+
         const getLimitedOptions = async (token, limits, node) => {
             const cacheValue = optionsCache.get(token);
             if (cacheValue) return cacheValue;
@@ -88,12 +103,13 @@ module.exports = {
             const provider = asrProvider.get();
             let options;
             if (!node && provider && typeof provider.getNodeOptions === 'function'){
-                options = provider.getNodeOptions(token);
+                options = await provider.getNodeOptions(token);
             }else{
                 if (!node) throw new Error('No reference node available to provide processing options.');
                 options = await node.getOptions();
             }
-            const limitedOptions = odmOptions.optionsWithLimits(options, limits.options);
+            const optionsWithProvider = await withProviderOptions(options, token);
+            const limitedOptions = odmOptions.optionsWithLimits(optionsWithProvider, limits.options);
             return optionsCache.set(token, limitedOptions);
         };
 
@@ -565,7 +581,16 @@ module.exports = {
                         // Special case for /task/<uuid>/download/<asset> if 
                         // we need to redirect to S3. In that case, we rewrite
                         // the URL to fetch from S3.
-                        if (asrProvider.downloadsPath() && action.indexOf('download') === 0){
+                        const downloadsPath = asrProvider.downloadsPath();
+                        const node = await routetable.lookupNode(taskId);
+                        const isDownloadAction = action.indexOf('download/') === 0;
+                        const asrInstance = asrProvider.get();
+                        const asrDriver = asrInstance && typeof asrInstance.getDriverName === 'function'
+                            ? asrInstance.getDriverName() : null;
+                        const nodeCanServeDownload = isDownloadAction && node && node.isOnline() && node.proxyTargetUrl();
+                        const downloadsPathEnabled = !config.force_node_downloads && downloadsPath && asrDriver !== 'tapis';
+
+                        if (downloadsPathEnabled && isDownloadAction && !nodeCanServeDownload){
                             const assetsMatch = action.match(/^download\/(.+)$/);
                             if (assetsMatch && assetsMatch[1]){
                                 let assetPath = assetsMatch[1];
@@ -573,10 +598,10 @@ module.exports = {
                                 // Special case for orthophoto.tif
                                 if (assetPath === 'orthophoto.tif') assetPath = 'odm_orthophoto/odm_orthophoto.tif';
 
-                                const s3Url = url.parse(asrProvider.downloadsPath());
+                                const s3Url = url.parse(downloadsPath);
                                 s3Url.pathname = path.join(taskId, assetPath);
 
-                                const s3Config = asrProvider.get().getConfig("s3");
+                                const s3Config = asrInstance ? asrInstance.getConfig("s3") : null;
 
                                 // If URL requires authentication, fetch the object on their behalf and then stream it to them
                                 // If our aws library gets updated to v3, then we could return a redirect to a presigned url instead 
@@ -617,8 +642,6 @@ module.exports = {
                                 }
                             }
                         }
-
-                        const node = await routetable.lookupNode(taskId);
 
                         if (node){
                             overrideRequest(req, node, query, pathname);
