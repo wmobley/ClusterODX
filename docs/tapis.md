@@ -16,6 +16,9 @@ node-count controls with the reference worker's processing options. Provider
 definitions take precedence for matching names, then user limits are applied.
 These controls remain available when workers register. Without a reference
 worker, the provider supplies the configured `nodeOptions` and Tapis controls.
+When `nodeOptions` is absent or empty, ClusterODM-compatible processing defaults
+are used. Workerless responses are not cached, so a newly registered worker can
+immediately supply its complete engine-specific option list.
 
 Task downloads are forwarded to the registered NodeODX worker using its node
 token. The Tapis Files API base URL is not an asset-storage redirect target.

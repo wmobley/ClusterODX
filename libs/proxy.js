@@ -98,7 +98,7 @@ module.exports = {
 
         const getLimitedOptions = async (token, limits, node) => {
             const cacheValue = optionsCache.get(token);
-            if (cacheValue) return cacheValue;
+            if (cacheValue && node) return cacheValue;
 
             const provider = asrProvider.get();
             let options;
@@ -110,7 +110,8 @@ module.exports = {
             }
             const optionsWithProvider = await withProviderOptions(options, token);
             const limitedOptions = odmOptions.optionsWithLimits(optionsWithProvider, limits.options);
-            return optionsCache.set(token, limitedOptions);
+            // A workerless fallback must not hide newly registered worker options.
+            return node ? optionsCache.set(token, limitedOptions) : limitedOptions;
         };
 
         const maxConcurrencyLimitReached = async (maxConcurrentTasks, token) => {

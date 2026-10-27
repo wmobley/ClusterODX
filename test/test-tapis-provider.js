@@ -45,6 +45,11 @@ const makeJwt = (username, tenant = 'tacc') => {
     });
 
     await provider.initialize();
+    const fallback = provider.getNodeOptions();
+    for (const name of ['pc-quality', 'split', 'orthophoto-resolution', 'tapis-queue']) {
+        assert.ok(fallback.some(option => option.name === name), `Missing fallback option: ${name}`);
+    }
+
     assert.strictEqual(provider.canHandle(50), true);
     assert.strictEqual(provider.canHandle(1001), false);
     assert.strictEqual(provider.getClusterOptions()[0].value, 'normal');

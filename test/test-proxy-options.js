@@ -38,8 +38,13 @@ function discovery(provider) {
         assert.strictEqual(result.length, 2);
         assert.strictEqual(result[0], processing);
         assert.strictEqual(result[1], queue);
-        assert.strictEqual(await getOptions('user', {}, worker), result);
+        if (worker) assert.strictEqual(await getOptions('user', {}, worker), result);
     }
+    const transition = discovery(provider);
+    await transition.getOptions('user', {}, null);
+    const workerOnly = {name: 'worker-only', type: 'bool', value: false};
+    const registered = await transition.getOptions('user', {}, {getOptions: async () => [workerOnly]});
+    assert.ok(registered.includes(workerOnly), 'worker options must replace workerless fallback immediately');
     const limited = await discovery(provider).getOptions('user', {
         options: {'tapis-queue': {value: 'limited'}}
     }, node);
