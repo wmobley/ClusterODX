@@ -97,6 +97,27 @@ const makeJwt = (username, tenant = 'portals') => {
         assert.strictEqual(jwtNode.nodeData.tapisJobOwner, 'worker-owner');
         assert.strictEqual(jwtNode.nodeData.tapisJobOwnerTenant, 'portals');
 
+        // Sibling hosts share a Tapis job but must join as distinct ordinary workers.
+        const lookupsBeforeSiblings = pendingLookups;
+        for (const workerId of [1, 2, 3]) {
+            const payload = {hostname: 'legacy-worker-sibling', port: 61100 + workerId,
+                role: 'worker', tapisJobUuid: 'shared-allocation',
+                registrationUuid: `shared-allocation-worker-${workerId}`, workerId,
+                childIndex: `${workerId + 1}-worker`, hostId: workerId + 1};
+            for (let attempt = 0; attempt < 2; attempt++) {
+                const sibling = await request(port, '/webhook/register-node', {
+                    method: 'POST', headers: workerHeaders, body: payload
+                });
+                assert.strictEqual(sibling.status, 200);
+            }
+            const registered = nodes.find(node => node.hostname() === payload.hostname && node.port() === payload.port);
+            assert.ok(registered);
+            assert.strictEqual(registered.isAutoSpawned(), false);
+            assert.strictEqual(registered.nodeData.workerId, workerId);
+        }
+        assert.strictEqual(pendingLookups, lookupsBeforeSiblings, 'worker arrival must not claim the parent task');
+        assert.strictEqual(nodes.all().filter(node => node.hostname() === 'legacy-worker-sibling').length, 3);
+
         const legacySecret = await request(port, '/webhook/register-node', {
             method: 'POST',
             body: {

@@ -278,3 +278,18 @@ for test_file in test/*.js; do node "$test_file" || exit 1; done
 
 The repository's `npm test` script runs the registered contract and regression tests. The
 loop above remains useful when running an individual test file that is not in the script.
+
+## Split-merge coordinator behind nginx
+
+Set `--public-address https://clusterodm.tacc.utexas.edu` when starting the
+TACC cluster proxy so generated `sm-cluster` URLs use the public HTTPS endpoint.
+Without an explicit address, ClusterODX accepts `X-Forwarded-Proto: http` or
+`https` only from a loopback reverse proxy; nginx must overwrite that header
+with `$scheme`. Native TLS still selects HTTPS. Other proxy topologies should
+use an explicit public address. This avoids HTTP-to-HTTPS 301 redirects that
+can change split-task POST requests into GET requests.
+
+NodeODX multi-host allocations use the same admin/worker model as NodeODM LS6:
+one primary claims the original task; the other hosts register as ordinary
+workers and can receive submodel tasks without claiming the parent. Worker
+registration IDs and endpoints are distinct even though the Tapis job is shared.

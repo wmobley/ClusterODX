@@ -25,12 +25,18 @@ const URL = require('url').URL;
 
 module.exports = {
     publicAddressPath: function(urlPath, req, token){
+        // Trust the local reverse proxy, not arbitrary client forwarding headers.
+        const peer = req.socket && req.socket.remoteAddress;
+        const localProxy = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+        const forwarded = req.headers['x-forwarded-proto'];
+        const protocol = config.use_ssl ? 'https' :
+            localProxy && (forwarded === 'http' || forwarded === 'https') ? forwarded : 'http';
         const addrBase = config.public_address ? 
                     config.public_address : 
-                    `${config.use_ssl ? "https" : "http"}://${req.headers.host}`;
+                    `${protocol}://${req.headers.host}`;
         const url = new URL(urlPath, addrBase);
         if (token){
-            url.search = `token=${token}`;
+            url.searchParams.set('token', token);
         }
         return url.toString();
     },
