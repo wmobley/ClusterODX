@@ -46,6 +46,13 @@ worker assignment. Use Refresh or enable five-second auto-refresh to update both
 lists. Assignment describes the local route, not processing progress. Pending
 task records are in memory and do not survive a ClusterODX restart.
 
+The dashboard includes counts of registered/online nodes, tracked tasks, and
+worker assignments. Task rows show state badges and last activity; expand
+**View details** for the UUID, Tapis job, creation time, and local record source.
+Node rows show queue usage/capacity, engine information, flags, and an **Open
+node** link without credentials. The worker may require separate authentication.
+Both tables scroll horizontally on smaller screens.
+
 The administrative CLI on port 8080 remains password-protected. Set
 `--admin-pass` (or `admin-pass` in the configuration) for the CLI. The same
 password also enables the web interface when `admin-web-use-tapis-jwt` is false.

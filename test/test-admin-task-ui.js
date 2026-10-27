@@ -26,7 +26,9 @@ async function testTaskList(html) {
     global.__taskUi = { html };
     const source = read('../public/component/taskList.mjs')
         .replace(/^import .*;$/m, 'const { html } = globalThis.__taskUi;');
-    const { TaskList } = await import(moduleUrl(source));
+    const { TaskList, formatTaskDate } = await import(moduleUrl(source));
+    for (const value of [null, undefined, NaN, Infinity, 1e20]) assert.strictEqual(formatTaskDate(value), '—');
+    assert.notStrictEqual(formatTaskDate(0), '—');
     assert.match(text(TaskList({})), /No tracked tasks/);
     assert.match(text(TaskList({ loading: true })), /Loading tasks/);
     assert.doesNotMatch(text(TaskList({ loading: true })), /No tracked tasks/);
@@ -53,6 +55,46 @@ async function testTaskList(html) {
     assert.ok(text(tree).includes(`${payload}:3001`));
     assert.ok(!descendants(tree).some(node => ['img', 'script'].includes(node.type)));
     assert.ok(!descendants(tree).some(node => node.props.dangerouslySetInnerHTML));
+    assert.ok(descendants(tree).some(node => node.type === 'details'));
+    assert.match(text(tree), /Last Activity/);
+    assert.ok(descendants(tree).some(node => node.type === 'span' && node.props.class.includes('badge')));
+}
+
+async function testNodeList(html) {
+    global.__nodeUi = {html, useState: () => [false, () => {}],
+        postFetch: () => {}, deleteFetch: () => {}, DeleteInstanceDialog: () => {}};
+    const source = read('../public/component/nodeList.mjs').replace(/^import .*;\r?\n/gm, '');
+    const {NodeList, nodeUrl} = await import(moduleUrl(`const {html, useState, postFetch, deleteFetch, DeleteInstanceDialog} = globalThis.__nodeUi;\n${source}`));
+    assert.match(text(NodeList({})), /No registered nodes/);
+    const rows = [{name: 'Missing metadata'}, {name: 'Worker', isOnline: true,
+        nodeData: {hostname: 'worker.example', port: 3001, token: 'never-in-link', info: {totalMemory: 0}}}];
+    const tree = NodeList({nodes: rows});
+    assert.match(text(tree), /Missing metadata/);
+    const link = descendants(tree).find(node => node.type === 'a');
+    assert.strictEqual(link.props.href, 'http://worker.example:3001/');
+    assert.ok(!link.props.href.includes('never-in-link'));
+    assert.strictEqual(link.props.referrerpolicy, 'no-referrer');
+    assert.strictEqual(nodeUrl({hostname: '::1', port: 443}), 'https://[::1]/');
+    for (const hostname of ['javascript:alert(1)', 'user@host', 'host/path', 'host?token=x', 'bad host']) {
+        assert.strictEqual(nodeUrl({hostname, port: 3001}), null);
+    }
+    for (const port of [0, 65536, 'bad']) assert.strictEqual(nodeUrl({hostname: 'worker', port}), null);
+    delete global.__nodeUi;
+}
+
+async function testHeader(html) {
+    global.__headerUi = {html};
+    const source = read('../public/component/header.mjs')
+        .replace(/^import .*;\r?\n/m, 'const {html} = globalThis.__headerUi;\n');
+    const {Header} = await import(moduleUrl(source));
+    let signedOut = false;
+    const tree = Header({info: {name: 'ClusterODX', version: 'test'}, onSignout: () => { signedOut = true; }});
+    assert.match(text(tree), /ClusterODX/);
+    const button = descendants(tree).find(node => node.type === 'button');
+    assert.match(text(button), /Sign out/);
+    button.props.onClick();
+    assert.strictEqual(signedOut, true);
+    delete global.__headerUi;
 }
 
 // A small deterministic hook runtime exercises App's effects without a browser or network.
@@ -251,6 +293,8 @@ async function testApp(html) {
 (async () => {
     const html = await makeHtml();
     await testTaskList(html);
+    await testNodeList(html);
+    await testHeader(html);
     await testApp(html);
     console.log('ADMIN TASK UI TEST PASSED');
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

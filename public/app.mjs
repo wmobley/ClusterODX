@@ -173,7 +173,7 @@ export default function App() {
     return html`<${Login} onAuthenticated=${onAuthenticated} />`;
   }
 
-  return html`<div class="container">
+  return html`<div class="container-fluid dashboard-shell">
     <${Header}
       info=${info}
       onSignout=${() => {
@@ -181,6 +181,12 @@ export default function App() {
         resetDashboard();
       }}
     />
+    <div class="dashboard-summary mb-4" aria-label="Cluster overview">
+      <div><span class="text-muted">Registered nodes</span><strong>${nodes.length}</strong></div>
+      <div><span class="text-muted">Online nodes</span><strong>${nodes.filter(node => node.isOnline).length}</strong></div>
+      <div><span class="text-muted">Tracked tasks</span><strong>${tasks.length}</strong></div>
+      <div><span class="text-muted">Assigned to workers</span><strong>${tasks.filter(task => task.state === "assigned").length}</strong></div>
+    </div>
     <${NodeList} nodes=${nodes} getData=${loadDashboard} />
     <div id="btn-area">
       <${AddInstanceButton} getNodes=${loadDashboard} />

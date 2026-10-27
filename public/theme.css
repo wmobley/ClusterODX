@@ -17,3 +17,20 @@
 #btn-area {
   display: flex;
 }
+
+.dashboard-shell { max-width: 1600px; padding: 0 1.5rem 2rem; }
+.dashboard-panel { border: 1px solid #dee2e6; border-radius: .4rem; padding: 1rem; background: #fff; }
+.dashboard-panel h4 { margin-bottom: 1rem; }
+.dashboard-panel .table { margin-bottom: 0; }
+.dashboard-panel td { vertical-align: middle; }
+.dashboard-panel .badge { white-space: normal; text-align: left; }
+.dashboard-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+.dashboard-summary > div { padding: 1rem; border: 1px solid #dee2e6; border-radius: .4rem; background: #f8f9fa; }
+.dashboard-summary strong { display: block; font-size: 1.75rem; }
+.task-details { min-width: 10rem; max-width: 24rem; }
+.task-details summary { cursor: pointer; color: #0d6efd; }
+#btn-area { flex-wrap: wrap; gap: .5rem; margin-top: 1rem; align-items: center; }
+@media (max-width: 767px) {
+  .dashboard-shell { padding: 0 .75rem 1rem; }
+  .dashboard-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+}
