@@ -161,9 +161,42 @@ Ordinary `role: "worker"` registration requires either the request-scoped Tapis
 bearer token or a configured shared secret. Set the latter with
 `registration-secret` in the ClusterODX configuration, or with
 `worker.registrationSecret` in the Tapis ASR configuration. Task-bound primary
-registration always requires a validated Tapis bearer so the pending task can
+registration requires a validated Tapis bearer by default so the pending task can
 be matched to its tenant-qualified owner. UUIDs and owner fields are metadata,
 not authentication.
+
+For a cluster whose job owners are mutually trusted, opt into token-independent
+registration in the Tapis ASR configuration:
+
+```json
+"worker": {
+  "registrationSecret": "<provision-a-random-secret>",
+  "allowSharedSecretPrimaryRegistration": true
+}
+```
+
+This mode is disabled by default. When enabled, ClusterODX injects the effective
+secret into submitted jobs as `NODEODX_REGISTRATION_SECRET`. The top-level
+`registration-secret` setting takes precedence over `worker.registrationSecret`
+for both injection and validation. Configure one source to avoid confusion.
+Job environment overrides cannot supply their own registration credential.
+The updated NodeODX launcher explicitly selects secret authentication and omits
+its Tapis bearer for registration and deregistration. Invalid bearer requests
+still fail without falling back to the secret.
+
+Primary registration requires the exact submitted Tapis job UUID and a pending
+record with canonical username and tenant. Sibling workers inherit ownership
+from that allocation's pending or active record, whether they arrive before or
+after the primary. Client-supplied owner fields are ignored. Failed handoffs
+release the registration claim so the request can be retried.
+
+**Trust boundary:** the secret grants cluster-level authority and is delivered
+to job owners. Any holder who knows another pending job UUID can claim its work.
+Use JWT mode for clusters with mutually untrusted users. This does not refresh
+Tapis credentials; job cancellation and other Tapis API operations can still
+fail when the original token expires. A restarted ClusterODX loses its in-memory
+pending/active records. Deploy the updated server and launcher before enabling
+this setting; publishing an app or changing production configuration is separate.
 
 NodeODX shutdown uses `POST /webhook/deregister-node` with the same request-scoped
 Tapis bearer token. The preferred payload is the `nodeId` returned by registration;

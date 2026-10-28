@@ -1,6 +1,7 @@
 'use strict';
 
 const axios = require('axios');
+const config = require('../../config');
 const AbstractASRProvider = require('../classes/AbstractASRProvider');
 const tapisTaskOptions = require('../tapisTaskOptions');
 const logger = require('../logger');
@@ -120,18 +121,20 @@ const sameUser = (pending, identity) => {
     return ownerMatches && (!normalizedOwnerTenant || normalizedOwnerTenant === normalizedTenant);
 };
 
-const buildWorkerEnvVariables = (configuredEnv, tapisToken) => {
+const buildWorkerEnvVariables = (configuredEnv, tapisToken, registrationSecret) => {
     const envVariables = Array.isArray(configuredEnv) ? configuredEnv : [];
 
     // Current Tapis leaves the historical ${_tapisAccessToken} macro literal.
     // Pass the request JWT explicitly so NodeODX can authenticate its webhook.
-    return envVariables
-        .filter(variable => variable && variable.key !== 'TAPIS_ACCESS_TOKEN' && variable.key !== '_tapisAccessToken')
+    const result = envVariables
+        .filter(variable => variable && !['TAPIS_ACCESS_TOKEN', '_tapisAccessToken', 'NODEODX_REGISTRATION_SECRET'].includes(variable.key))
         .concat({
             key: 'TAPIS_ACCESS_TOKEN',
             value: tapisToken,
             description: 'Request-scoped Tapis JWT for NodeODX worker authentication'
         });
+    if (registrationSecret) result.push({ key: 'NODEODX_REGISTRATION_SECRET', value: registrationSecret });
+    return result;
 };
 
 module.exports = class TapisAsrProvider extends AbstractASRProvider {
@@ -142,7 +145,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             system: { executionSystemId: 'CHANGEME!', archiveSystemId: 'CHANGEME!', logicalQueue: 'vm-small' },
             scheduler: { defaultAllocation: '' },
             job: { maxJobTime: '01:00:00', nodeCount: 1, coresPerNode: 1, memoryMB: 4096, archiveOnAppError: true, maxNodesPerJob: 1, appArgs: [], envVariables: [] },
-            worker: { registrationSecret: '' },
+            worker: { registrationSecret: '', allowSharedSecretPrimaryRegistration: false },
             maxRuntime: -1,
             maxUploadTime: 3600,
             jobLimit: -1,
@@ -569,7 +572,9 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             archiveOnAppError: this.getConfig('job.archiveOnAppError', true),
             parameterSet: {
                 appArgs: this.getConfig('job.appArgs', []),
-                envVariables: buildWorkerEnvVariables(this.getConfig('job.envVariables', []), token),
+                envVariables: buildWorkerEnvVariables(this.getConfig('job.envVariables', []), token,
+                    this.getConfig('worker.allowSharedSecretPrimaryRegistration', false) === true
+                        ? config.registration_secret || this.getConfig('worker.registrationSecret', '') : ''),
                 schedulerOptions: allocation ? [{ arg: `-A ${allocation}`, name: 'TACC Allocation' }] : []
             },
             subscriptions: []
@@ -647,10 +652,23 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             tapisJobOwnerTenant: identity ? identity.tenantId : null,
             submittedJobs: submission.submittedJobs
         };
+        this.activeJobs.set(submission.primaryJobId, Object.assign(this.activeJobs.get(submission.primaryJobId) || {}, {
+            tapisJobId: submission.primaryJobId,
+            tapisJobOwner: pending.tapisJobOwner,
+            tapisJobOwnerTenant: pending.tapisJobOwnerTenant
+        }));
         this.pendingTasks.set(hostname, pending);
         this.pendingTasks.set(submission.primaryJobId, pending);
         this.pendingTasks.set(pending.taskId, pending);
         return null;
+    }
+
+    findRegistrationJob(identifier) {
+        const job = this.findPendingTask(identifier) || this.activeJobs.get(identifier);
+        if (!job) return null;
+        // Active jobs are keyed by the actual submitted Tapis UUID.
+        if (job.tapisJobId && job.tapisJobId !== identifier) return null;
+        return job;
     }
 
     findPendingTask(identifier) {

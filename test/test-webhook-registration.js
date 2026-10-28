@@ -206,6 +206,80 @@ const makeJwt = (username, tenant = 'portals') => {
             body: { hostname: 'legacy-worker-autospawned', port: 61016, role: 'worker' }
         });
         assert.strictEqual(autoSpawnedRegistration.status, 409);
+
+        // Trusted-cluster opt-in: exact allocation identity, both arrival orders,
+        // and an actual local /task/new handoff without live Tapis writes.
+        const routetable = require('../libs/routetable');
+        const tasktable = require('../libs/tasktable');
+        const originalAdd = routetable.add;
+        const originalDelete = tasktable.delete;
+        let submitted = 0;
+        let failSubmit = true;
+        let consumed = false;
+        let claimed = false;
+        const allocation = { taskId: 'secret-task', tapisJobId: 'secret-job',
+            tapisJobOwner: 'trusted-owner', tapisJobOwnerTenant: 'portals',
+            token: 'expired-owner-token', pathImport: '/corral/webodm/media/images', taskOptions: [] };
+        provider.getConfig = key => ({ 'worker.registrationSecret': 'worker-secret',
+            'worker.allowSharedSecretPrimaryRegistration': true })[key];
+        provider.findPendingTask = id => !consumed && ['secret-job', 'secret-task'].includes(id) ? allocation : null;
+        provider.findRegistrationJob = id => id === 'secret-job' ? allocation : null;
+        provider.claimPendingTask = () => { if (claimed) return false; claimed = true; return true; };
+        provider.releasePendingTask = () => { claimed = false; };
+        provider.consumePendingTask = () => { consumed = true; };
+        const worker = http.createServer((req, res) => {
+            req.resume();
+            if (req.url.startsWith('/task/new')) submitted++;
+            res.writeHead(failSubmit ? 500 : 200, {'content-type': 'application/json'});
+            res.end(JSON.stringify(failSubmit ? {error: 'fixture rejection'} : {uuid: 'secret-task'}));
+        });
+        await new Promise(resolve => worker.listen(0, '127.0.0.1', resolve));
+        const payload = { hostname: '127.0.0.1', port: worker.address().port, role: 'admin',
+            tapisJobUuid: 'secret-job', registrationSecret: 'worker-secret', tapisJobOwner: 'forged' };
+        const register = body => request(port, '/webhook/register-node', {method: 'POST', body});
+        routetable.add = async (id, node) => {
+            assert.strictEqual(id, 'secret-task');
+            assert.strictEqual(node.nodeData.tapisJobOwner, 'trusted-owner');
+            assert.strictEqual(node.nodeData.tapisJobOwnerTenant, 'portals');
+        };
+        tasktable.delete = async () => {};
+        try {
+            assert.strictEqual((await register({...payload, registrationSecret: 'wrong'})).status, 401);
+            assert.strictEqual((await register({...payload, registrationSecret: undefined})).status, 401);
+            assert.strictEqual((await register({...payload, tapisJobUuid: 'secret-task'})).status, 403);
+            allocation.tapisJobOwnerTenant = null;
+            assert.strictEqual((await register(payload)).status, 403);
+            allocation.tapisJobOwnerTenant = 'portals';
+            const sibling = {...payload, hostname: 'legacy-worker-secret-bound', port: 61100, role: 'worker'};
+            assert.strictEqual((await register(sibling)).status, 200);
+            assert.strictEqual(nodes.find(n => n.hostname() === sibling.hostname).nodeData.tapisJobOwner, 'trusted-owner');
+            assert.strictEqual((await register({...sibling, tapisJobUuid: 'unknown-job'})).status, 403);
+            claimed = true;
+            assert.strictEqual((await register(payload)).status, 409);
+            claimed = false;
+            assert.strictEqual((await register(payload)).status, 502);
+            assert.strictEqual(claimed, false, 'failed handoff releases the claim');
+            assert.ok(!nodes.find(n => n.hostname() === '127.0.0.1' && n.port() === payload.port));
+            failSubmit = false;
+            const accepted = await register(payload);
+            assert.strictEqual(accepted.status, 200, accepted.body);
+            assert.strictEqual(JSON.parse(accepted.body).authMethod, 'registration-secret');
+            assert.strictEqual(consumed, true);
+            assert.strictEqual(submitted, 2);
+            assert.strictEqual((await register(payload)).status, 200, 'lost-response retry is idempotent');
+            assert.strictEqual((await register({...payload, port: payload.port + 1})).status, 403);
+            assert.strictEqual(submitted, 2, 'retry must not resubmit work');
+            assert.strictEqual((await register({...sibling, port: 61101})).status, 200,
+                'sibling can arrive after primary consumes pending work');
+            const badBearer = await request(port, '/webhook/register-node', {method: 'POST',
+                headers: {authorization: 'Bearer invalid-token'}, body: payload});
+            assert.strictEqual(badBearer.status, 401, 'invalid bearer does not fall back');
+        } finally {
+            routetable.add = originalAdd;
+            tasktable.delete = originalDelete;
+            nodes.remove(nodes.find(n => n.hostname() === '127.0.0.1' && n.port() === payload.port));
+            await new Promise(resolve => worker.close(resolve));
+        }
     } finally {
         await new Promise(resolve => server.close(resolve));
         asrProvider.get = originalGet;

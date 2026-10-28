@@ -93,6 +93,21 @@ const makeJwt = (username, tenant = 'tacc') => {
         }
     ]);
 
+    const globalConfig = require('../config');
+    const originalSecret = globalConfig.registration_secret;
+    provider.config.worker = { registrationSecret: 'fixture-cluster-secret', allowSharedSecretPrimaryRegistration: true };
+    await provider.submitJobWithoutData('test-token', 'secret-job', 50, []);
+    assert.strictEqual(payload.parameterSet.envVariables.find(v => v.key === 'NODEODX_REGISTRATION_SECRET').value, 'fixture-cluster-secret');
+    globalConfig.registration_secret = 'fixture-global-secret';
+    await provider.submitJobWithoutData('test-token', 'global-secret-job', 50, []);
+    assert.strictEqual(payload.parameterSet.envVariables.find(v => v.key === 'NODEODX_REGISTRATION_SECRET').value, 'fixture-global-secret');
+    globalConfig.registration_secret = originalSecret;
+    provider.config.job.envVariables.push({key: 'NODEODX_REGISTRATION_SECRET', value: 'untrusted-override'});
+    provider.config.worker.allowSharedSecretPrimaryRegistration = false;
+    await provider.submitJobWithoutData('test-token', 'jwt-job', 50, []);
+    assert.ok(!payload.parameterSet.envVariables.some(v => v.key === 'NODEODX_REGISTRATION_SECRET'));
+    provider.config.job.envVariables.pop();
+
     const result = await provider.submitJobWithoutData('test-token', 'clusterodx-test', 50, [
         { name: 'tapis-queue', value: 'gpu-a100-small' },
         { name: 'tapis-allocation', value: 'ALLOC-1' },
@@ -180,6 +195,8 @@ const makeJwt = (username, tenant = 'tacc') => {
     assert.strictEqual(provider.findPendingTask('cluster-task-1').tapisJobId, 'tapis-job-2');
     assert.strictEqual(provider.consumePendingTask('tapis-job-2').taskId, 'cluster-task-1');
     assert.strictEqual(provider.findPendingTask('cluster-task-1'), null);
+    assert.strictEqual(provider.findRegistrationJob('tapis-job-2').tapisJobOwner, 'owner');
+    assert.strictEqual(provider.findRegistrationJob('cluster-task-1'), null);
 
     console.log('TAPIS PROVIDER TEST PASSED');
 })().catch(error => {

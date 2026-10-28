@@ -178,6 +178,17 @@ module.exports = {
         return res.status(401).json({ error: "Tapis token or registration secret required" });
       }
 
+      const sharedSecretPrimaryEnabled = typeof provider.getConfig === 'function' &&
+        provider.getConfig('worker.allowSharedSecretPrimaryRegistration', false) === true;
+      if (authMethod === 'registration-secret' && sharedSecretPrimaryEnabled && registration.role === 'worker') {
+        const job = registration.tapisJobUuid && typeof provider.findRegistrationJob === 'function' &&
+          provider.findRegistrationJob(registration.tapisJobUuid);
+        if (!job || !job.tapisJobOwner || !job.tapisJobOwnerTenant) {
+          return res.status(403).json({ error: 'Known Tapis job ownership required for secret worker registration' });
+        }
+        validatedIdentity = { username: job.tapisJobOwner, tenantId: job.tapisJobOwnerTenant };
+      }
+
       // Preserve the original ClusterODM contract for explicitly marked
       // worker registrations. These nodes are authenticated, ordinary
       // cluster nodes and must not claim, consume, or submit a pending Tapis
@@ -253,7 +264,7 @@ module.exports = {
         });
       }
 
-      if (authMethod !== 'tapis-jwt') {
+      if (authMethod !== 'tapis-jwt' && !sharedSecretPrimaryEnabled) {
         logHandoffEvent(logger, 'webhook_rejected', Object.assign(registrationFields(), {
           outcome: 'rejected',
           error_class: 'auth_error'
@@ -262,7 +273,23 @@ module.exports = {
       }
 
       let pending = provider.findPendingTask(registration.tapisJobUuid) ||
-                    provider.findPendingTask(registration.registrationUuid);
+                    (authMethod === 'tapis-jwt' && provider.findPendingTask(registration.registrationUuid));
+      if (authMethod === 'registration-secret' && !pending && registration.tapisJobUuid) {
+        const completedNode = nodes.find(node => node.getTapisJobId &&
+          node.getTapisJobId() === registration.tapisJobUuid &&
+          node.hostname() === registration.hostname && node.port() === registration.port &&
+          node.nodeData.tapisJobOwner && node.nodeData.tapisJobOwnerTenant);
+        if (completedNode) {
+          return res.json({ success: true, message: 'Tapis worker registration already completed',
+            nodeId: nodes.all().indexOf(completedNode) + 1,
+            tapisJobUuid: registration.tapisJobUuid, authMethod });
+        }
+      }
+      if (authMethod === 'registration-secret' && (!pending ||
+          pending.tapisJobId !== registration.tapisJobUuid ||
+          !pending.tapisJobOwner || !pending.tapisJobOwnerTenant)) {
+        return res.status(403).json({ error: 'Exact pending Tapis job and ownership required for secret registration' });
+      }
       let pendingMatchMode = pending ? 'identifier' : null;
 
       // The UUIDs are correlation metadata, not the ownership boundary. The
@@ -383,8 +410,8 @@ module.exports = {
       delete registrationMetadata.tapisJobOwnerTenant;
       Object.assign(node.nodeData, registrationMetadata, {
         nodeReady: registration.nodeReady,
-        tapisJobOwner: pending.tapisJobOwner || validatedIdentity.username,
-        tapisJobOwnerTenant: pending.tapisJobOwnerTenant || validatedIdentity.tenantId
+        tapisJobOwner: pending.tapisJobOwner || (validatedIdentity && validatedIdentity.username),
+        tapisJobOwnerTenant: pending.tapisJobOwnerTenant || (validatedIdentity && validatedIdentity.tenantId)
       });
 
       let nodeWasAdded = false;
