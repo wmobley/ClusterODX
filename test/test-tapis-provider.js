@@ -1,6 +1,7 @@
 const assert = require('assert');
 const TapisProvider = require('../libs/asr-providers/tapis');
 const logger = require('../libs/logger');
+const odmOptions = require('../libs/odmOptions');
 
 const makeJwt = (username, tenant = 'tacc') => {
     const payload = Buffer.from(JSON.stringify({
@@ -46,9 +47,66 @@ const makeJwt = (username, tenant = 'tacc') => {
 
     await provider.initialize();
     const fallback = provider.getNodeOptions();
-    for (const name of ['pc-quality', 'split', 'orthophoto-resolution', 'tapis-queue']) {
+    const fallbackNodeOptions = fallback.filter(option => !option.name.startsWith('tapis-'));
+    const expectedNodeOptionNames = [
+        'end-with', 'rerun-from', 'min-num-features', 'feature-type', 'feature-quality',
+        'matcher-type', 'matcher-neighbors', 'use-fixed-camera-params', 'cameras', 'camera-lens',
+        'radiometric-calibration', 'max-concurrency', 'use-hybrid-bundle-adjustment', 'sfm-algorithm',
+        'sky-removal', 'bg-removal', 'use-3dmesh', 'skip-3dmodel', 'skip-report', 'skip-orthophoto',
+        'ignore-gsd', 'no-gpu', 'mesh-size', 'mesh-octree-depth', 'fast-orthophoto', 'crop',
+        'boundary', 'auto-boundary', 'auto-boundary-distance', 'pc-quality', 'pc-classify', 'pc-csv',
+        'pc-las', 'pc-ept', 'pc-copc', 'pc-filter', 'pc-sample', 'pc-skip-geometric', 'pc-tile',
+        'smrf-scalar', 'smrf-slope', 'smrf-threshold', 'smrf-window', 'texturing-skip-global-seam-leveling',
+        'texturing-skip-local-seam-leveling', 'texturing-keep-unseen-faces', 'texturing-single-material',
+        'gltf', 'use-exif', 'dtm', 'dsm', 'dem-gapfill-steps', 'dem-resolution', 'dem-decimation',
+        'dem-euclidean-map', 'orthophoto-resolution', 'orthophoto-no-tiled', 'orthophoto-png',
+        'orthophoto-kmz', 'orthophoto-compression', 'orthophoto-cutline', 'tiles', '3d-tiles',
+        'rolling-shutter', 'rolling-shutter-readout', 'build-overviews', 'cog', 'video-limit',
+        'video-resolution', 'split', 'split-overlap', 'sm-no-align', 'sm-cluster', 'merge',
+        'force-gps', 'gps-accuracy', 'optimize-disk-space', 'pc-rectify', 'primary-band',
+        'skip-band-alignment'
+    ];
+    assert.strictEqual(new Set(fallbackNodeOptions.map(option => option.name)).size, fallbackNodeOptions.length);
+    assert.deepStrictEqual(
+        fallbackNodeOptions.map(option => option.name).sort(),
+        expectedNodeOptionNames.sort()
+    );
+    for (const name of ['pc-quality', 'split', 'orthophoto-resolution', 'min-num-features', 'tapis-queue']) {
         assert.ok(fallback.some(option => option.name === name), `Missing fallback option: ${name}`);
     }
+    const minimumFeatures = fallbackNodeOptions.find(option => option.name === 'min-num-features');
+    assert.strictEqual(minimumFeatures.type, 'int');
+    assert.strictEqual(minimumFeatures.value, '10000');
+    assert.strictEqual(fallbackNodeOptions.find(option => option.name === 'feature-type').type, 'enum');
+    const expectedFallbackSchemas = [
+        { name: 'min-num-features', type: 'int', value: '10000', domain: 'integer' },
+        { name: 'matcher-type', type: 'enum', value: 'flann', domain: ['bow', 'bruteforce', 'flann'] },
+        { name: 'camera-lens', type: 'enum', value: 'auto', domain: ['auto', 'perspective', 'brown', 'fisheye', 'spherical', 'equirectangular', 'dual'] },
+        { name: 'max-concurrency', type: 'int', value: '4', domain: 'positive integer' },
+        { name: 'crop', type: 'float', value: '3', domain: 'positive float' },
+        { name: 'pc-filter', type: 'float', value: '2.5', domain: 'positive float' },
+        { name: 'dem-resolution', type: 'float', value: '5', domain: 'float' },
+        { name: 'orthophoto-resolution', type: 'float', value: '5', domain: 'float > 0.0' },
+        { name: 'split', type: 'int', value: '999999', domain: 'positive integer' },
+        { name: 'split-overlap', type: 'float', value: '150', domain: 'positive integer' },
+        { name: 'sm-cluster', type: 'string', value: 'None', domain: 'string' },
+        { name: 'gps-accuracy', type: 'float', value: '10', domain: 'positive float' },
+        { name: 'primary-band', type: 'string', value: 'auto', domain: 'string' }
+    ];
+    for (const expected of expectedFallbackSchemas) {
+        const option = fallbackNodeOptions.find(candidate => candidate.name === expected.name);
+        assert.deepStrictEqual({
+            name: option.name,
+            type: option.type,
+            value: option.value,
+            domain: option.domain
+        }, expected);
+    }
+    assert.doesNotThrow(() => odmOptions.filterOptions([
+        { name: 'min-num-features', value: '18000' },
+        { name: 'feature-type', value: 'sift' },
+        { name: 'split', value: '8' }
+    ], fallbackNodeOptions));
 
     assert.strictEqual(provider.canHandle(50), true);
     assert.strictEqual(provider.canHandle(1001), false);

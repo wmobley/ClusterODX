@@ -4,6 +4,8 @@ const axios = require('axios');
 const config = require('../../config');
 const AbstractASRProvider = require('../classes/AbstractASRProvider');
 const tapisTaskOptions = require('../tapisTaskOptions');
+// Supplements the legacy fallback with options in NodeODX's public schema.
+const nodeodxExtraOptions = require('../nodeodx-extra-options');
 const logger = require('../logger');
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|credential|api.?key)/i;
@@ -232,7 +234,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     }
 
     getNodeOptions() {
-        // Match ClusterODM's fallback when no reference worker is online.
+        // Keep ClusterODM's established defaults and add the remaining NodeODX options.
         const defaultOptions = [
             {
                 "name": "auto-boundary",
@@ -252,7 +254,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "crop",
                 "type": "float",
                 "value": "3",
-                "domain": "",
+                "domain": "positive float",
                 "help": "Automatically crop image outputs by creating a smooth buffer around the dataset boundaries, shrunk by N meters."
             },
             {
@@ -273,7 +275,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "pc-filter",
                 "type": "float",
                 "value": "2.5",
-                "domain": "",
+                "domain": "positive float",
                 "help": "Filters the point cloud by removing points that deviate more than N standard deviations from the local mean."
             },
             {
@@ -319,9 +321,9 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "type": "string",
                 "value": "flann",
                 "domain": [
+                    "bow",
                     "bruteforce",
                     "flann",
-                    "bow"
                 ],
                 "help": "Matcher algorithm, Fast Library for Approximate Nearest Neighbors or Bag of Words."
             },
@@ -329,15 +331,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "orthophoto-resolution",
                 "type": "float",
                 "value": "5",
-                "domain": "",
+                "domain": "float > 0.0",
                 "help": "Orthophoto resolution in cm / pixel."
-            },
-            {
-                "name": "orthophoto-target-srs",
-                "type": "string",
-                "value": "",
-                "domain": "",
-                "help": "Target spatial reference system. Accepts EPSG codes, WKT and PROJ strings."
             },
             {
                 "name": "orthophoto-compression",
@@ -357,25 +352,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "dem-resolution",
                 "type": "float",
                 "value": "5",
-                "domain": "",
+                "domain": "float",
                 "help": "DSM/DTM resolution in cm / pixel."
-            },
-            {
-                "name": "texturing-data-term",
-                "type": "string",
-                "value": "gmi",
-                "domain": [
-                    "gmi",
-                    "area"
-                ],
-                "help": "Data term: [area, gmi]. Default is gmi (Gradient Magnitude Inconsistency) which works well for most cases."
-            },
-            {
-                "name": "gcp",
-                "type": "string",
-                "value": "",
-                "domain": "json",
-                "help": "Path to the file containing the ground control points used for georeferencing."
             },
             {
                 "name": "use-3dmesh",
@@ -423,7 +401,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "gps-accuracy",
                 "type": "float",
                 "value": "10",
-                "domain": "",
+                "domain": "positive float",
                 "help": "Set a value in meters for the GPS Dilution of Precision (DOP) information for all images."
             },
             {
@@ -437,14 +415,14 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "max-concurrency",
                 "type": "int",
                 "value": "4",
-                "domain": "",
+                "domain": "positive integer",
                 "help": "The maximum number of processes to use in various processes. Peak memory requirement is ~1GB per thread and 2 megapixel image resolution."
             },
             {
                 "name": "min-num-features",
                 "type": "int",
                 "value": "10000",
-                "domain": "",
+                "domain": "integer",
                 "help": "Minimum number of features to extract per image. More features lead to better results but slower execution."
             },
             {
@@ -457,7 +435,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                     "brown",
                     "fisheye",
                     "spherical",
-                    "equirectangular"
+                    "equirectangular",
+                    "dual"
                 ],
                 "help": "Set a camera lens model. By default the application tries to determine a lens model from the images."
             },
@@ -476,34 +455,39 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 "name": "primary-band",
                 "type": "string",
                 "value": "auto",
-                "domain": "",
+                "domain": "string",
                 "help": "When processing multispectral datasets, you can specify the name of the primary band that will be used for reconstruction."
             },
             {
                 "name": "split",
                 "type": "int",
-                "value": "1",
-                "domain": "",
+                "value": "999999",
+                "domain": "positive integer",
                 "help": "Average number of images per submodel. Set to a positive integer to enable split-merge processing for large datasets. When set to 1, ODM will automatically determine the optimal split size."
             },
             {
                 "name": "split-overlap",
                 "type": "float",
                 "value": "150",
-                "domain": "",
+                "domain": "positive integer",
                 "help": "Overlap between submodels in meters. Ensures accurate tie points and georeferencing across submodel boundaries. Recommended: 100-200m for typical drone surveys."
             },
             {
                 "name": "sm-cluster",
                 "type": "string",
-                "value": "",
-                "domain": "",
+                "value": "None",
+                "domain": "string",
                 "help": "URL of the split-merge cluster coordinator. Automatically set by ClusterODM when using distributed processing. Leave empty for single-machine processing."
             }
         ];
         const nodeOptions = this.getConfig('nodeOptions', []);
         if (!Array.isArray(nodeOptions)) throw new Error('Invalid config key nodeOptions (array expected)');
-        return (nodeOptions.length ? nodeOptions : defaultOptions).concat(this.getClusterOptions());
+        const fallbackOptions = defaultOptions.concat(nodeodxExtraOptions).map(option => ({
+            ...option,
+            type: Array.isArray(option.domain) ? 'enum' : option.type,
+            value: option.type === 'bool' ? String(option.value).toLowerCase() : option.value
+        }));
+        return (nodeOptions.length ? nodeOptions : fallbackOptions).concat(this.getClusterOptions());
     }
 
     createApiClient(token) {

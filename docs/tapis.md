@@ -17,8 +17,18 @@ definitions take precedence for matching names, then user limits are applied.
 These controls remain available when workers register. Without a reference
 worker, the provider supplies the configured `nodeOptions` and Tapis controls.
 When `nodeOptions` is absent or empty, ClusterODM-compatible processing defaults
-are used. Workerless responses are not cached, so a newly registered worker can
-immediately supply its complete engine-specific option list.
+are combined with the NodeODX options missing from ClusterODM's fallback list.
+The additional options in `libs/nodeodx-extra-options.js` mirror the public
+NodeODX `/options` schema used by app version `1.0.18`; keep this snapshot
+synchronized when upgrading the NodeODX app. The separate GCP file input remains
+the supported way to provide GCP data. Workerless responses are not cached, so
+a newly registered worker can immediately supply its complete engine-specific
+option list.
+
+For split/merge processing, ClusterODX replaces any submitted `sm-cluster`
+value with the public URL used for the request. Requests through
+`clusterodm.tacc.utexas.edu` therefore route split/merge callbacks through that
+ClusterODM host.
 
 Task downloads are forwarded to the registered NodeODX worker using its node
 token. The Tapis Files API base URL is not an asset-storage redirect target.
