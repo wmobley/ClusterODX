@@ -1,7 +1,7 @@
 # Shared-secret NodeODX registration
 
 ## Status
-Implemented — local source changes and tests complete on 2026-10-28; deployment authorized on 2026-10-28; rollout in progress.
+Implemented — local source changes and tests complete on 2026-10-28; deployed to TACC on 2026-10-28; callback authentication verified without a processing job.
 
 ## Objective
 Allow NodeODX registration and deregistration with a configured cluster registration secret when a Tapis access token expires.
@@ -51,6 +51,16 @@ Production secret provisioning is not part of the local implementation. Producti
 - 2026-10-28: QA identified a completed-registration retry regression. Added exact-job/same-endpoint replay acceptance and regression tests proving no duplicate submission.
 - 2026-10-28: Validation: full ClusterODX npm test passed; affected webhook/provider tests passed again after the retry fix; six launcher multi-node/auth tests and four capacity tests passed; Bash syntax and both repository diff checks passed. Tests use local HTTP/mocked curl only.
 - 2026-10-28: Source changes complete. Existing modified nodeodx-ls6.zip was preserved; it has not been rebuilt or published for this change. Rollout still needs updated launcher packaging and production provisioning. No other implementation deviations.
+
+### 2026-10-28 - Deployment completed
+
+- **Decision:** Deploy the approved shared-secret opt-in after the user explicitly requested commit, push and TACC deployment.
+- **Reason:** Registration must survive submission JWT expiry for the trusted LS6 job owners.
+- **Alternatives rejected:** Anonymous registration remains disabled; no new processing allocation was needed for callback verification.
+- **User feedback:** User: “do it” after deployment was explicitly identified as outstanding.
+- **Impact on implementation:** ClusterODX code 878e383 deployed on webodm, restarted via restart.sh (PID 2307197); private ASR config and rollback backup mode 0600, secret generated remotely and never logged. NodeODX source/package commits 24b279c and 163f25c pushed to upgrade/nodeodx-tacc-ls6. Existing app version 1.0.18 release archive replaced atomically at its existing Corral URI. Old remote ZIP retained with suffix .pre-shared-secret-20261028.
+- **Verification:** Local/public service health succeeded. Wrong-secret primary probe returned 401; configured-secret probe with nonexistent job returned 403, confirming authentication then correlation rejection without node/job creation. New ZIP SHA-256: 4d85a3a8e8d668960711f39c5b90ad06103a92196cf4196b68cb299c59956d26; old ZIP SHA-256: 2be63b89902160dcd546e9253b36d000d732730ce00713b61fc78351a0cdf8b7. Uploaded and local archive hashes match. Six launcher tests and four capacity tests passed during packaging. Same-version build regenerated ZIP metadata, so a second package commit records exact deployed bytes.
+- **Remaining validation:** No new Slurm/Tapis processing job was submitted. Fresh-job staging and end-to-end photogrammetry acceptance remain untested. Existing allocations were absent during rollout.
 
 ## User feedback / decisions
 User: “lets do that”, followed by “do it”, approving the shared-secret implementation described in chat. No production write or deployment authorized.
