@@ -551,10 +551,9 @@ module.exports = {
 
                 try{
                     if (sharedSource){
-                        node = await sharedSubmodel.select(sharedSource);
+                        node = await sharedSubmodel.select(sharedSource, { reserve: true });
                         if (!node) throw new Error('No capable workers available in the parent allocation');
-                    }
-                    if (!autoscale) node.incTransients();
+                    }else if (!autoscale) node.incTransients();
                     await taskNewInit();
                     await taskNewUpload();
                     await taskNewCommit();

@@ -6,9 +6,23 @@ const fields = ['shared_submodel_version', 'seed_path', 'parent_task_uuid', 'att
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-7][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const job = node => node && node.nodeData && node.nodeData.tapisJobUuid;
 const eligible = (node, source) => !!(source && job(node) === source && node.isOnline() && !node.isLocked() && node.getInfo().capabilities && node.getInfo().capabilities.shared_submodel_v1 === true);
-async function select(source) {
-    await nodes.updateInfo();
-    return nodes.filter(node => eligible(node, source)).sort((a, b) => b.availableSlots() - a.availableSlots())[0] || null;
+let selectQueue = Promise.resolve();
+let turnCounter = 0;
+// Selection and slot reservation run serialized so concurrent submodel tasks
+// see each other's reservations instead of all picking the same worker.
+function select(source, options = {}) {
+    const run = selectQueue.then(async () => {
+        await nodes.updateInfo();
+        const best = nodes.filter(node => eligible(node, source)).sort((a, b) =>
+            (b.availableSlots() - a.availableSlots()) || ((a.turn || 0) - (b.turn || 0)))[0] || null;
+        if (best && options.reserve) {
+            best.turn = ++turnCounter;
+            best.incTransients();
+        }
+        return best;
+    });
+    selectQueue = run.catch(() => {});
+    return run;
 }
 async function authorize(params, token, taskId) {
     if (params.shared_source_job_uuid !== undefined) throw new Error('Client supplied shared source allocation is forbidden');
