@@ -15,14 +15,17 @@ const INPUT = '/corral/webodm/media/project/9/task/images';
 
 // Only replace external effects. Exercise the actual task submission/options/path
 // logic without the optional native libcurl binding or a live processing worker.
-function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, pathImport = INPUT } = {}) {
+function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, pathImport = INPUT, v1 = false, parentToken = 'task-owner-token', crossAllocation = false, capable = true, spoof = false, accepted = false } = {}) {
     const requests = [];
     const records = new Map();
     const routes = [];
     const cleanups = [];
+    const cancellations = [];
     const output = [];
     const workers = ['worker-a', 'worker-b'].map(hostname => new Node(hostname, 3001, 'worker-token'));
     workers.forEach(worker => { worker.nodeData.info = { maxParallelTasks: 1, taskQueueCount: 0 }; });
+    workers.forEach(worker => { worker.taskInfo = async () => accepted ? {uuid: TASK_ID, status: {code: statusCodes.RUNNING}} : {error: 'not found'}; worker.taskCancel = async uuid => { cancellations.push(uuid); return {success: true}; }; });
+    workers.forEach(worker => { worker.isOnline = () => true; worker.nodeData.tapisJobUuid = crossAllocation ? 'other-job' : 'source-job'; worker.nodeData.info.capabilities = {shared_submodel_v1: capable}; });
     let selected = 0;
     let rejected = false;
     let response;
@@ -52,6 +55,8 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
     const mocks = {
         'node-libcurl': { Curl },
         './nodes': {
+            updateInfo: async () => {},
+            filter: predicate => workers.filter(predicate),
             findBestAvailableNode: async () => workers[switchWorker ? Math.min(selected++, 1) : 0]
         },
         './asrProvider': {
@@ -66,12 +71,21 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
             delete: async uuid => records.delete(uuid)
         },
         './routetable': {
+            lookup: async () => ({token: parentToken, node: {nodeData: {tapisJobUuid: 'source-job'}}}),
             add: async (uuid, node, token) => {
                 assert.strictEqual(requests[requests.length - 1].stage, 'commit', 'route must follow commit');
                 routes.push({ uuid, node, token });
             }
         }
     };
+    const helperFile = require.resolve('../libs/sharedSubmodel');
+    const helper = new Module(helperFile, module);
+    helper.filename = helperFile;
+    helper.paths = module.paths;
+    const helperRequire = Module.createRequire(helperFile);
+    helper.require = name => Object.prototype.hasOwnProperty.call(mocks, name) ? mocks[name] : helperRequire(name);
+    helper._compile(fs.readFileSync(helperFile, 'utf8'), helperFile);
+    mocks['./sharedSubmodel'] = helper.exports;
     const filename = require.resolve('../libs/taskNew');
     const loaded = new Module(filename, module);
     loaded.filename = filename;
@@ -88,8 +102,9 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
                     writeHead: code => assert.strictEqual(code, 200),
                     end: data => { response = JSON.parse(data); }
                 }, { approveNewTask: async () => ({ approved: true }) }, TASK_ID, {
-                    options: [], taskName: 'Flight', skipPostProcessing: true,
-                    outputs: 'all.zip', dateCreated: 1700000000000,
+                    options: [], taskName: 'Flight', skipPostProcessing: v1 ? 'true' : true,
+                    ...(v1 ? {shared_submodel_version: '1', seed_path: '/corral/webodm/media/seed.zip', parent_task_uuid: TASK_ID, attempt_id: TASK_ID, ...(spoof ? {shared_source_job_uuid: 'source-job'} : {})} : {}),
+                    outputs: v1 ? '["all.zip"]' : 'all.zip', dateCreated: 1700000000000,
                     webhook: 'https://callback.example/complete', pathImport,
                     fileNames: Array.from({ length: fileCount }, (_, i) => `image-${i}.jpg`),
                     imagesCount: fileCount
@@ -104,7 +119,7 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
             clearTimeout(timer);
         }
     };
-    return { run, requests, records, routes, cleanups, output, workers, response: () => response };
+    return { run, requests, records, routes, cleanups, cancellations, output, workers, response: () => response };
 }
 
 const field = (request, name) => request.fields.find(part => part.name === name)?.contents;
@@ -174,6 +189,31 @@ async function main() {
     const unchanged = fixture({ pathImport: '/scratch/shared/images' });
     await unchanged.run();
     assert.strictEqual(field(unchanged.requests[0], 'import_path'), '/scratch/shared/images');
+    config.splitmerge = true;
+    const v1 = fixture({v1: true});
+    await v1.run();
+    assert.deepStrictEqual(v1.requests.map(request => request.stage), ['init', 'commit']);
+    for (const [name, value] of Object.entries({shared_submodel_version: '1', seed_path: '/worker-a/shared/seed.zip', parent_task_uuid: TASK_ID, attempt_id: TASK_ID, shared_source_job_uuid: 'source-job', outputs: '["all.zip"]'})) assert.strictEqual(field(v1.requests[0], name), value);
+    for (const rejectStage of ['init', 'commit']) {
+        const failure = fixture({v1: true, rejectStage});
+        await failure.run();
+        assert.strictEqual(failure.routes.length, 0);
+        assert.strictEqual(failure.requests.filter(request => request.stage === rejectStage).length, 1);
+        assert.strictEqual(failure.records.get(TASK_ID).taskInfo.status.code, statusCodes.FAILED);
+        assert.deepStrictEqual(failure.cancellations, [TASK_ID]);
+    }
+    const lostAck = fixture({v1: true, rejectStage: 'commit', accepted: true});
+    await lostAck.run();
+    assert.strictEqual(lostAck.routes.length, 1, 'accepted UUID must be reconciled on the same worker');
+    assert.strictEqual(lostAck.requests.filter(request => request.stage === 'init').length, 1);
+    assert.deepStrictEqual(lostAck.cancellations, []);
+    for (const settings of [{parentToken: 'someone-else'}, {crossAllocation: true}, {capable: false}, {spoof: true}]) {
+        const rejected = fixture({v1: true, ...settings});
+        await assert.rejects(rejected.run(), /ownership|capable|forbidden/);
+        assert.strictEqual(rejected.requests.length, 0);
+    }
+    config.splitmerge = false;
+    await assert.rejects(fixture({v1: true}).run(), /split-merge/);
     console.log('EXISTING WORKER SUBMISSION TEST PASSED');
 }
 

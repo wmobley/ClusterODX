@@ -30,6 +30,7 @@ const statusCodes = require('./statusCodes');
 const asrProvider = require('./asrProvider');
 const logger = require('./logger');
 const events = require('events');
+const sharedSubmodel = require('./sharedSubmodel');
 const { translateImportPathForNode } = require('./tapisRegistration');
 
 const assureUniqueFilename = (dstPath, filename) => {
@@ -116,7 +117,10 @@ module.exports = {
         if (options.parseFields){
             busboy.on('field', function(fieldname, val, fieldnameTruncated, valTruncated) {
                 // Save options
-                if (fieldname === 'options'){
+                if (sharedSubmodel.fields.includes(fieldname)){
+                    params[fieldname] = val;
+                }
+                else if (fieldname === 'options'){
                     params.options = val;
                 }
     
@@ -312,12 +316,15 @@ module.exports = {
         const { approved, error } = await cloudProvider.approveNewTask(token, imagesCount);
         if (!approved) throw new Error(error);
 
-        let node = await nodes.findBestAvailableNode(imagesCount, true);
+        const sharedSource = await sharedSubmodel.authorize(params, token, uuid);
+        if (sharedSource && !config.splitmerge) throw new Error('Cannot use this node as a split-merge cluster.');
+        let node = sharedSource ? await sharedSubmodel.select(sharedSource) : await nodes.findBestAvailableNode(imagesCount, true);
+        if (sharedSource && !node) throw new Error('No capable workers available in the parent allocation');
         
         // Do we need to / can we create a new node via autoscaling?
         const provider = asrProvider.get();
         const tapisAutoscale = provider && provider.getDriverName && provider.getDriverName() === 'tapis';
-        const autoscale = (!node || node.availableSlots() === 0) && 
+        const autoscale = !sharedSource && (!node || node.availableSlots() === 0) &&
                             asrProvider.isAllowedToCreateNewNodes() &&
                             asrProvider.canHandle(fileNames.length || imagesCount);
 
@@ -402,6 +409,7 @@ module.exports = {
             const taskNewInit = async () => {
                 return new Promise((resolve, reject) => {
                     const body = [];
+                    for (const [name, contents] of Object.entries(sharedSubmodel.forwarded(params, node))) body.push({name, contents});
                     body.push({
                         name: 'name',
                         contents: name
@@ -510,6 +518,9 @@ module.exports = {
 
             const abortTask = () => {
                 eventEmitter.emit('abort');
+                if (sharedSource && node) {
+                    Promise.resolve(node.taskCancel(uuid)).catch(error => logger.warn(`Shared task cancellation failed: ${error.message}`));
+                }
                 if (dmHostname && autoscale){
                     const asr = asrProvider.get();
                     try{
@@ -539,14 +550,26 @@ module.exports = {
                 eventEmitter.emit('close');
 
                 try{
+                    if (sharedSource){
+                        node = await sharedSubmodel.select(sharedSource);
+                        if (!node) throw new Error('No capable workers available in the parent allocation');
+                    }
                     if (!autoscale) node.incTransients();
                     await taskNewInit();
                     await taskNewUpload();
                     await taskNewCommit();
-                    if (!autoscale) node.decTransients();
+                    if (!autoscale && node) node.decTransients();
                 }catch(e){
-                    if (!autoscale) node.decTransients();
+                    if (!autoscale && node) node.decTransients();
                     if (e.message === "status.aborted") return;
+                    if (sharedSource) {
+                        // A commit acknowledgment can be lost after publication. Reconcile the
+                        // same UUID on the same worker; never create another attempt elsewhere.
+                        const info = await node.taskInfo(uuid);
+                        if (info && !info.error && info.uuid === uuid) return;
+                        await node.taskCancel(uuid);
+                        throw e;
+                    }
 
                     // Attempt to retry
                     if (retries < MAX_UPLOAD_RETRIES){
@@ -557,7 +580,8 @@ module.exports = {
                         // If autoscale is enabled, simply retry on same node
                         // otherwise switch to another node
                         if (!autoscale){
-                            const newNode = await nodes.findBestAvailableNode(imagesCount, true);
+                            const newNode = sharedSource ? await sharedSubmodel.select(sharedSource) : await nodes.findBestAvailableNode(imagesCount, true);
+                            if (sharedSource && !newNode) throw new Error('No capable workers available in the parent allocation');
                             if (newNode){
                                 node = newNode;
                                 logger.warn(`Switched ${uuid} to ${node}`);
@@ -585,7 +609,7 @@ module.exports = {
                 try{
                     dmHostname = asr.generateHostname(imagesCount);
                     node = await asr.createNode(req, imagesCount, token, dmHostname, status,
-                                                taskOptions, fileNames, tmpPath, uuid, pathImport);
+                                                taskOptions, fileNames, tmpPath, uuid, pathImport, params);
                     // Tapis workers register asynchronously. The registration webhook will
                     // upload/submit the pending task and add the route when the worker is ready.
                     if (status.aborted) return;
@@ -608,7 +632,7 @@ module.exports = {
 
                 utils.rmdir(tmpPath);
             }catch(e){
-                handleError(e);
+                await handleError(e);
             }
         }else{
             throw new Error("No nodes available");

@@ -159,11 +159,12 @@ module.exports = {
         const proxy = new HttpProxy();
         const optionsCache = new ValueCache({expires: 60 * 60 * 1000});
         const pathHandlers = {
-            '/info': function(req, res, user){
+            '/info': async function(req, res, user){
                 const { limits } = user;
                 const node = nodes.referenceNode();
                 
                 json(res, {
+                    capabilities: { shared_submodel_v1: !!config.splitmerge && await require('./sharedSubmodel').capability(user.token) },
                     version: "1.5.3", // this is the version we speak
                     taskQueueCount: 0,
                     totalMemory: 99999999999, 

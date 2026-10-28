@@ -619,7 +619,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return { primaryJobId: uuid, submittedJobs: [{ tapisJobId: uuid, jobName: job.name }] };
     }
 
-    async createNode(req, imagesCount, token, hostname, status, taskOptions = [], fileNames = [], tmpPath = null, clusterTaskId = null, pathImport = null) {
+    async createNode(req, imagesCount, token, hostname, status, taskOptions = [], fileNames = [], tmpPath = null, clusterTaskId = null, pathImport = null, submissionParams = {}) {
         if (!token) throw new Error('Tapis token is required for Tapis-backed task creation');
         if (!this.canHandle(imagesCount)) throw new Error(`Cannot handle ${imagesCount} images.`);
 
@@ -640,6 +640,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             fileNames,
             tmpPath,
             pathImport,
+            submissionParams,
             token,
             nodeUser: identity ? identity.fullUser : null,
             tapisJobOwner: identity ? identity.username : null,

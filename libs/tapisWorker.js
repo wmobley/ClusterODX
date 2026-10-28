@@ -6,6 +6,7 @@ const axios = require('axios');
 const FormData = require('form-data');
 const { translateImportPathForNode } = require('./tapisRegistration');
 const logger = require('./logger');
+const sharedSubmodel = require('./sharedSubmodel');
 const {
     classifySubmitError,
     logHandoffEvent,
@@ -44,8 +45,17 @@ const submitPendingTask = async (pending, node) => {
     try {
         if (!pending || !node) throw new Error('Pending task and node are required');
 
+        const params = pending.submissionParams || {};
+        if (params.shared_submodel_version !== undefined) {
+            await node.updateInfo();
+            if (!sharedSubmodel.eligible(node, params.shared_source_job_uuid)) throw new Error('Worker cannot accept this shared submodel allocation');
+        }
         const form = new FormData();
-        form.append('name', `tapis_job_${pending.jobId || pending.tapisJobId}`);
+        for (const [field, value] of Object.entries(sharedSubmodel.forwarded(params, node))) form.append(field, value);
+        for (const field of ['outputs', 'skipPostProcessing', 'webhook', 'dateCreated']) {
+            if (params[field] !== undefined && params[field] !== null) form.append(field, String(params[field]));
+        }
+        form.append('name', params.taskName || `tapis_job_${pending.jobId || pending.tapisJobId}`);
         form.append('options', JSON.stringify(Array.isArray(pending.taskOptions) ? pending.taskOptions : []));
 
         let usedImportPath = false;
@@ -98,6 +108,7 @@ const submitPendingTask = async (pending, node) => {
 
         const responseUuid = responseData.uuid;
         if (taskHeaderId && responseUuid && responseUuid !== taskHeaderId) {
+            if (params.shared_submodel_version) throw new Error('Shared task UUID mismatch');
             logger.warn(`NodeODX returned task UUID ${responseUuid}; using pending task UUID ${taskHeaderId}`);
         }
         if (!taskHeaderId && !responseUuid) {

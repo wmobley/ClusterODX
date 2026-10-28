@@ -293,3 +293,25 @@ NodeODX multi-host allocations use the same admin/worker model as NodeODM LS6:
 one primary claims the original task; the other hosts register as ordinary
 workers and can receive submodel tasks without claiming the parent. Worker
 registration IDs and endpoints are distinct even though the Tapis job is shared.
+
+## Shared submodel protocol v1
+
+An authenticated `/info` request advertises
+`capabilities.shared_submodel_v1` only for a caller with an owned parent route
+and a capable worker in that route's allocation. NodeODX must be explicitly
+configured for shared mode with a compatible engine image.
+
+The submodel request uses `shared_submodel_version=1`, an image-directory
+`import_path`, immutable `seed_path`, `parent_task_uuid`, and `attempt_id`.
+The `set-uuid` header must equal the attempt UUID. Existing `options`, `outputs`
+and `skipPostProcessing=true` are preserved. ClusterODX derives
+`shared_source_job_uuid` from the owned parent route; clients cannot supply it.
+Only capable workers with matching registration allocation metadata are eligible.
+Shared requests cannot autoscale into an unrelated allocation or run when
+split-merge support is disabled. Worker validation and task-owned copies remain
+required; filesystem visibility alone is not authorization.
+
+The ordinary image-only `import_path` API is unchanged. V1 removes HTTP image
+uploads, not shared-filesystem copying or result downloads. Existing pending
+submission descriptors preserve the optional fields for handoff compatibility;
+process-local pending tasks still do not survive a restart.
