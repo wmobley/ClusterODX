@@ -6,7 +6,30 @@ registry, so photogrammetry scheduling, retries, shared-submodel selection and `
 unaffected (`test/test-splat-partition.js`). Design:
 `docs/design/2026-10-30-nodesplat-worker.md` in the suite root.
 
-## Configuration (`config.json` → `splat`)
+## Configuration (`splat-config.json`)
+
+Put the `splat` block in its own file, passed with `--splat-config <file>`, in the same way as
+`--asr tapis-config.json`. `restart.sh` uses `splat-config.json` automatically when it exists
+(override with `SPLAT_CONFIG=<file>`) and sets it to mode 0600, because it holds the grant
+secrets. The file contains the block's keys directly (not wrapped in `"splat": {}`):
+
+```json
+{
+  "enabled": true,
+  "instanceId": "clusterodx-tacc",
+  "grantKeys": { "webodm": { "wo-2026-10": "<secret>" } },
+  "profile": { "...": "see the table below" }
+}
+```
+
+A `"splat"` block inside the `--config` file still works; keys in `--splat-config` take
+precedence. A named file that is missing or invalid stops startup. This file is separate from
+the NodeODX autoscaler profile (`tapis-config.json`), which NodeSplat never reads, so its
+image-count queue mapping cannot affect GPU training. `profile.callbackUrl` is the public
+ClusterODX base URL only (for example `https://clusterodm.tacc.utexas.edu`). The worker appends
+`/webhook/register-node` itself. A leftover `callbackPolicy` key from an older file is ignored.
+
+### Keys
 
 | Key | Default |
 |---|---|
@@ -18,11 +41,27 @@ unaffected (`test/test-splat-partition.js`). Design:
 | `maxLogBytes` / `maxPageLines` / `maxPageBytes` | 50 MiB / 500 / 256 KiB |
 | `grantMaxAgeSeconds` / `workerLeaseSeconds` | 300 / 86400 |
 | `grantKeys` | `{}` — `{ "<issuer>": { "<key_id>": "<secret>" } }` |
-| `callbackPolicy` | `{schemes:[],hosts:[],cidrs:[],ports:[]}` — empty fails closed |
-| `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `inputRoot`, `outputRoot`, `callbackUrl`, `workerBindHost`, `workerPort` |
+| `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `callbackUrl`, `workerBindHost`, `workerPort`. Optional shared-storage overrides: `inputRoot`, `outputRoot` (this host's view) and `workerInputRoot`, `workerOutputRoot` (the LS6 view) |
 
 Startup fails if `maxMinutes * 60 + 600 > workerLeaseSeconds`. There are no production
 defaults for any profile value. Secrets belong in deployment configuration only.
+
+### Shared storage (no paths to configure)
+
+By default the splat directories live under the shared media tree ClusterODX already maps for NodeODX
+(`node_shared_path_mappings["*"]`, this host's view -> the node's view). With the mapping
+`/corral/webodm/media` -> `/corral/utexas/BCS26030/webodm/media`:
+
+| | This host | LS6 worker |
+|---|---|---|
+| Input snapshots | `/corral/webodm/media/splats/staging/<run>/input` | `/corral/utexas/BCS26030/webodm/media/splats/staging/<run>/input` |
+| Results and console | `/corral/webodm/media/splats/output/<run>/` | `/corral/utexas/BCS26030/webodm/media/splats/output/<run>/` |
+
+WebODM must write to and read from those same physical directories: set `WO_OPENSPLAT_STAGING_ROOT`
+and `WO_OPENSPLAT_OUTPUT_ROOT` to `<WebODM's path to its media dir>/splats/staging` and
+`<...>/splats/output`. The directories must be writable by WebODM (staging) and by the LS6 job user
+(output). Setting any of the four profile keys overrides the derived value; a key outside the mapped
+tree is used as-is on both sides.
 
 ## Endpoints
 
@@ -37,9 +76,27 @@ Tapis could not be reached.
   reconciliation), `GET /splat/task/:uuid/output?line=N`,
   `GET /splat/task/:uuid/download/{model.ply,manifest.json,console.txt}`,
   `POST /splat/task/cancel` — 202 `cancel_pending` until the allocation is confirmed stopped.
-- `POST /splat/worker/register` and `/splat/worker/heartbeat` — worker only, bound to one
-  task/job/profile by a hashed per-job callback capability. Callback capabilities expire at the
-  lease deadline and are revoked on terminal handoff.
+- `POST /webhook/register-node` with `role: "nodesplat"` — the same webhook NodeODX workers use. A NodeSplat worker authenticates with its per-job token, not the cluster-wide NodeODX registration secret, and sends
+  `{hostname, port, token, tapisJobUuid, registrationUuid, role, nodeReady}`
+  every 30 seconds; it is an idempotent keepalive, so a ClusterODX restart (which drops the
+  in-memory worker token) is repaired by the next one. The token hash is compared in constant time and
+  the request must match one exact non-terminal splat task: its UUID (`registrationUuid`), its
+  recorded Tapis job UUID and the per-job worker API token (hash-only in the record). A task
+  whose job UUID is not recorded yet gets 409 so the worker retries. These workers are handled
+  only by the splat store and never enter the NodeODX node registry, route table or task table.
+  The worker URL is `http://<hostname>:<port>/`; as with NodeODX there is no host/CIDR allowlist.
+
+## Worker status and handoff
+
+There are no worker heartbeats. An owner-authenticated `sync` polls the registered worker's
+`/task/:uuid/info` (phase, progress, worker status); a failed poll is only a stale signal. When
+the worker reports `result_ready`, ClusterODX verifies the published artifacts, records
+`result_ready` and acknowledges with `POST /task/remove` on the worker (retried by later syncs
+until it succeeds). A worker-reported failure or cancel is acknowledged the same way, and the
+Tapis allocation result decides the final state.
+
+The job receives `NODESPLAT_API_CAPABILITY` (random per job; only its hash is stored by ClusterODX) and
+`NODESPLAT_CALLBACK_URL`. No cluster-wide secret is placed in the job environment.
 
 ## Recovery and logs
 
@@ -53,4 +110,4 @@ run's shared output directory, so it remains available after the worker exits.
 - `signin_required` / 401: the Tapis session is invalid or expired for this tenant.
 - `tapis_forbidden` / 403: Tapis denied the app, system or allocation.
 - `capacity` / 429: another NodeSplat run is active.
-- `invalid_callback` / 403: wrong job, expired lease, revoked or replayed capability.
+- `invalid_registration` / 401, 403: the task, job or per-job token do not match an active attempt. 409 `job_not_bound` means retry shortly.

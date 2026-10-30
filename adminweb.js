@@ -30,6 +30,7 @@ const utils = require("./libs/utils");
 const { extractBearerToken, normalizeRegistration } = require("./libs/tapisRegistration");
 const { submitPendingTask } = require("./libs/tapisWorker");
 const { classifySubmitError, logHandoffEvent, safeNodeEndpoint } = require("./libs/observability");
+const { SplatError } = require("./libs/splatAuth");
 const crypto = require("crypto");
 const { isIP } = require("net");
 
@@ -116,6 +117,27 @@ module.exports = {
         tapis_job_id: registration.tapisJobUuid,
         task_id: registration.registrationUuid
       });
+
+      // NodeSplat workers use this same webhook, authenticated by their per-job token, but are handled entirely by the
+      // dedicated splat store: they are never added to the node registry, route table or task table.
+      if (registration.role === "nodesplat") {
+        const splatTasks = require("./libs/splatInstance").instance;
+        if (!splatTasks || !splatTasks.config.enabled) {
+          return res.status(404).json({ error: "NodeSplat is not enabled" });
+        }
+        try {
+          const result = await splatTasks.registerWorker(registration);
+          logHandoffEvent(logger, "webhook_completed", Object.assign(registrationFields(), { outcome: "nodesplat_registered" }));
+          return res.json(result);
+        } catch (error) {
+          const known = error instanceof SplatError;
+          logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+            outcome: "rejected",
+            error_class: known ? error.code : "unavailable"
+          }));
+          return res.status(known ? error.status : 503).json({ error: known ? error.message : "NodeSplat registration is temporarily unavailable" });
+        }
+      }
 
       const provider = asrProvider.get();
       if (!provider || typeof provider.getDriverName !== "function" || provider.getDriverName() !== "tapis") {

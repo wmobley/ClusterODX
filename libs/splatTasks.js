@@ -12,7 +12,7 @@ const defaults = {
     enabled:false, profileId:'nodesplat-v1', instanceId:'', storeDir:'data/splat-tasks',
     maxConcurrentRuns:1, maxLogBytes:52428800, maxPageLines:500, maxPageBytes:262144,
     maxResultBytes:8*1024*1024*1024, grantMaxAgeSeconds:300, workerLeaseSeconds:86400,
-    grantKeys:{}, callbackPolicy:{schemes:[],hosts:[],cidrs:[],ports:[]}, profile:{}
+    grantKeys:{}, profile:{}
 };
 const TERMINAL = new Set(['ready','failed','canceled']);
 const random = () => crypto.randomBytes(32).toString('base64url');
@@ -42,16 +42,33 @@ const shaFile = file => new Promise((resolve,reject) => {
     stream.on('data',chunk=>digest.update(chunk)); stream.on('error',reject); stream.on('end',()=>resolve(digest.digest('hex')));
 });
 
+// Shared-storage roots default to the media tree ClusterODX already maps for NodeODX
+// (node_shared_path_mappings["*"]: this host's view -> the node's view). Explicit profile values win.
+function resolveRoots(profile, mappings) {
+    const [source,target]=Object.entries((mappings && mappings['*']) || {})[0] || [];
+    const toNode=value => {
+        if(!value || !source || !target) return value;
+        const prefix=source.endsWith('/')?source:source+'/';
+        if(value!==source && !value.startsWith(prefix)) return value;
+        return path.posix.normalize(target+value.slice(source.length));
+    };
+    const inputRoot=profile.inputRoot || (source && path.posix.join(source,'splats','staging'));
+    const outputRoot=profile.outputRoot || (source && path.posix.join(source,'splats','output'));
+    return {inputRoot,outputRoot,
+        workerInputRoot:profile.workerInputRoot || toNode(inputRoot),
+        workerOutputRoot:profile.workerOutputRoot || toNode(outputRoot)};
+}
+
 class SplatTasks {
     constructor(options={}, dependencies={}) {
         this.config=Object.assign({},defaults,options);
-        this.config.callbackPolicy=Object.assign({},defaults.callbackPolicy,options.callbackPolicy);
         this.profile=this.config.profile;
         this.api=dependencies.api || ((token) => axios.create({baseURL:this.profile.baseUrl,timeout:60000,maxRedirects:0,headers:{'X-Tapis-Token':token}}));
         this.requestWorker=dependencies.workerRequest || workerRequest;
         this.sessions=new Map();
         this.operations=new Map();
         if(this.config.enabled) {
+            this.profile=Object.assign({},this.profile,resolveRoots(this.profile,dependencies.sharedPathMappings));
             const required=['baseUrl','tenantId','appId','appVersion','executionSystemId','archiveSystemId','queue','allocation','coresPerNode','memoryMB','maxMinutes','inputRoot','outputRoot','callbackUrl','workerBindHost','workerPort'];
             if(!this.config.instanceId || required.some(key=>!this.profile[key]) || this.profile.maxMinutes*60+600>this.config.workerLeaseSeconds) throw new Error('Incomplete NodeSplat fixed profile');
             const base=new URL(this.profile.baseUrl);
@@ -92,9 +109,9 @@ class SplatTasks {
         this.operations.set(id,current);
         try { return await current; } finally { if(this.operations.get(id)===current) this.operations.delete(id); }
     }
-    buildJob(r,callback,api) {
+    buildJob(r,api) {
         const p=this.profile;
-        const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_CALLBACK_CAPABILITY:callback,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
+        const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
         return {name:r.job_name,appId:p.appId,appVersion:p.appVersion,execSystemId:p.executionSystemId,execSystemLogicalQueue:p.queue,archiveSystemId:p.archiveSystemId,nodeCount:1,coresPerNode:p.coresPerNode,memoryMB:p.memoryMB,maxMinutes:p.maxMinutes,archiveOnAppError:true,parameterSet:{appArgs:p.appArgs||[],envVariables:Object.keys(env).map(key=>({key,value:env[key]})),schedulerOptions:[{name:'TACC Allocation',arg:`-A ${p.allocation}`}]}};
     }
     async create(body,owner,token) {
@@ -114,12 +131,12 @@ class SplatTasks {
         // Recheck after async hashing so concurrent create requests cannot exceed capacity.
         if(this.store.all().some(r=>r.run_id===body.run_id)) return this.create(body,owner,token);
         if(this.store.all().filter(r=>!TERMINAL.has(r.state)).length>=this.config.maxConcurrentRuns) fail(429,'capacity','The GPU training profile is busy.');
-        const callback=random(),api=random();
-        const r={version:1,uuid:uuid(),owner,run_id:body.run_id,source_task_id:body.source_task_id,manifest_sha256:body.manifest_sha256,profile_id:body.profile_id,settings:body.settings,request_hash:requestHash,grant_hash:grantHash,state:'submitting',phase:'Submitting GPU worker',tapis_job_uuid:null,cancel_pending:false,callback_hash:hash(callback),api_hash:hash(api),lease_expires_at:Date.now()+this.config.workerLeaseSeconds*1000};
+        const api=random();
+        const r={version:1,uuid:uuid(),owner,run_id:body.run_id,source_task_id:body.source_task_id,manifest_sha256:body.manifest_sha256,profile_id:body.profile_id,settings:body.settings,request_hash:requestHash,grant_hash:grantHash,state:'submitting',phase:'Submitting GPU worker',tapis_job_uuid:null,cancel_pending:false,api_hash:hash(api),lease_expires_at:Date.now()+this.config.workerLeaseSeconds*1000};
         r.job_name=`nodesplat-${r.uuid}`;
         this.save(r);
         try {
-            const response=await this.api(token).post('/v3/jobs/submit',this.buildJob(r,callback,api));
+            const response=await this.api(token).post('/v3/jobs/submit',this.buildJob(r,api));
             const result=response.data && response.data.result;
             if(!result || !result.uuid) throw new Error('Uncertain Tapis response');
             r.tapis_job_uuid=result.uuid;
@@ -136,24 +153,36 @@ class SplatTasks {
         this.save(r);
         return {status:202,record:r};
     }
-    callbackRecord(body,token) {
-        const r=this.store.get(body.uuid);
-        if(!r || r.revoked || r.lease_expires_at<Date.now() || !same(hash(token||''),r.callback_hash) || !r.tapis_job_uuid || body.run_id!==r.run_id || body.tapis_job_uuid!==r.tapis_job_uuid || body.profile_id!==r.profile_id) fail(403,'invalid_callback','Worker authorization is invalid.');
-        return r;
-    }
-    async register(body,token) {
-        const r=this.callbackRecord(body,token);
-        if(!same(hash(body.api_capability||''),r.api_hash)) fail(403,'invalid_callback','Worker API authorization is invalid.');
-        if(r.worker_url && r.worker_url!==body.url) fail(409,'worker_conflict','Worker identity cannot change.');
-        const info=await this.requestWorker(body.url,'/info',body.api_capability,this.config.callbackPolicy);
-        if(info.engine!=='nodesplat' || !Array.isArray(info.capabilities) || !info.capabilities.includes('opensplat-webodm-v1')) fail(409,'worker_capability','Worker does not support this training profile.');
-        this.sessions.set(r.uuid,body.api_capability);
-        r.worker_url=body.url; r.last_heartbeat=Date.now(); this.save(r);
-        const result=await this.requestWorker(body.url,'/task/new',body.api_capability,this.config.callbackPolicy,'POST',{run_id:r.run_id,source_task_id:r.source_task_id,manifest_sha256:r.manifest_sha256,settings:r.settings,'set-uuid':r.uuid});
-        if(result.uuid!==r.uuid) fail(409,'worker_identity','Worker task identity does not match.');
-        if(!TERMINAL.has(r.state) && r.state!=='cancel_pending' && r.state!=='result_ready') { r.state='running'; r.phase='Preparing training inputs'; }
-        this.save(r);
-        return {ok:true,uuid:r.uuid};
+    // NodeODX-style webhook registration (adminweb /webhook/register-node, role "nodesplat").
+    // Authenticated by the per-job worker token (only its hash is stored) and bound to one exact pending task/job;
+    // no cluster-wide secret is placed in the job environment.
+    // It is an idempotent keepalive: a ClusterODX restart drops the in-memory worker token and
+    // the next registration restores it. Never touches the generic node registry.
+    async registerWorker(reg) {
+        if(!this.config.enabled) fail(404,'disabled','NodeSplat training is disabled.');
+        const token=typeof reg.nodeToken==='string'?reg.nodeToken:'';
+        const denied=()=>fail(403,'invalid_registration','Worker registration is not authorized.');
+        if(!UUID.test(reg.registrationUuid||'')) denied();
+        return this.serialize(reg.registrationUuid,async()=>{
+            const r=this.store.get(reg.registrationUuid);
+            if(!r) denied();
+            if(!r.tapis_job_uuid) fail(409,'job_not_bound','The GPU job is not recorded yet; retry registration.');
+            if(typeof reg.tapisJobUuid!=='string' || reg.tapisJobUuid!==r.tapis_job_uuid || r.revoked || r.lease_expires_at<Date.now() || TERMINAL.has(r.state) || !token || !same(hash(token),r.api_hash)) denied();
+            if(!/^[A-Za-z0-9.-]{1,253}$/.test(reg.hostname||'') || !Number.isInteger(reg.port) || reg.port<1 || reg.port>65535) fail(400,'invalid_registration','Invalid worker address.');
+            const url=`http://${reg.hostname}:${reg.port}/`;
+            if(r.worker_url && r.worker_url!==url) fail(409,'worker_conflict','Worker identity cannot change.');
+            this.sessions.set(r.uuid,token);
+            if(r.worker_started) return {success:true,uuid:r.uuid};
+            const info=await this.requestWorker(url,'/info',token);
+            if(info.engine!=='nodesplat' || !Array.isArray(info.capabilities) || !info.capabilities.includes('opensplat-webodm-v1')) fail(409,'worker_capability','Worker does not support this training profile.');
+            r.worker_url=url; r.last_heartbeat=Date.now(); this.save(r);
+            const result=await this.requestWorker(url,'/task/new',token,'POST',{run_id:r.run_id,source_task_id:r.source_task_id,manifest_sha256:r.manifest_sha256,settings:r.settings,'set-uuid':r.uuid});
+            if(result.uuid!==r.uuid) fail(409,'worker_identity','Worker task identity does not match.');
+            r.worker_started=true;
+            if(!TERMINAL.has(r.state) && r.state!=='cancel_pending' && r.state!=='result_ready') { r.state='running'; r.phase='Preparing training inputs'; }
+            this.save(r);
+            return {success:true,uuid:r.uuid};
+        });
     }
     async verifyArtifacts(r) {
         const manifest=regularFile(this.profile.outputRoot,r.run_id,'manifest.json',1024*1024);
@@ -162,19 +191,39 @@ class SplatTasks {
         if(m.run_id!==r.run_id || m.source_task_id!==r.source_task_id || m.cluster_task_uuid!==r.uuid || m.tapis_job_uuid!==r.tapis_job_uuid || m.profile_id!==r.profile_id || !m.app || m.app.id!==this.profile.appId || m.app.version!==this.profile.appVersion || canonical(m.settings)!==canonical(r.settings) || !m.output || m.output.bytes!==ply.stat.size || ply.stat.size===0 || m.output.sha256!==await shaFile(ply.file)) fail(409,'artifact_invalid','Training artifacts failed verification.');
         return m;
     }
-    async heartbeat(body,token) {
-        const r=this.callbackRecord(body,token);
-        r.last_heartbeat=Date.now();
-        if(typeof body.phase==='string') r.phase=body.phase.replace(/[\r\n]/g,' ').slice(0,120);
-        if(body.progress && Number.isInteger(body.progress.iteration) && Number.isInteger(body.progress.total) && body.progress.iteration>=0 && body.progress.total===r.settings.num_iterations && body.progress.iteration<=body.progress.total) r.progress=body.progress;
-        let ack=false;
-        if(body.state==='result_ready' && !r.cancel_pending) { await this.verifyArtifacts(r); r.state='result_ready'; r.phase='Training complete; releasing GPU worker'; ack=true; }
-        if(['failed','canceled'].includes(body.state)) { r.worker_terminal=body.state; r.phase=body.state==='failed'?'Worker failed; checking allocation':'Worker stopped; checking allocation'; ack=true; }
-        this.save(r);
-        return {ack,acknowledged:ack};
+    // Owner-synced polling replaces worker heartbeats. A failed poll is only a stale signal.
+    async pollWorker(r) {
+        const token=this.sessions.get(r.uuid);
+        if(!r.worker_url || !token || r.revoked) return;
+        let info=null;
+        try { info=await this.requestWorker(r.worker_url,`/task/${r.uuid}/info`,token); } catch(_) { /* worker may be starting or gone */ }
+        if(info && typeof info==='object') {
+            r.last_heartbeat=Date.now();
+            const code=info.status && info.status.code;
+            if(Number.isInteger(code)) r.worker_status=code;
+            if(typeof info.phase==='string' && r.state!=='result_ready') r.phase=info.phase.replace(/[\r\n]/g,' ').slice(0,120);
+            const p=info.progress;
+            if(p && Number.isInteger(p.iteration) && Number.isInteger(p.total) && p.iteration>=0 && p.total===r.settings.num_iterations && p.iteration<=p.total) r.progress={iteration:p.iteration,total:p.total};
+            if(info.result_ready===true && !r.cancel_pending && r.state!=='result_ready') {
+                try {
+                    await this.verifyArtifacts(r);
+                    r.state='result_ready'; r.phase='Training complete; releasing GPU worker'; r.ack_pending=true;
+                } catch(_) { r.phase='Training artifacts failed verification'; }
+            } else if(code===30 || code===50) {
+                r.worker_terminal=code===30?'failed':'canceled';
+                r.phase=code===30?'Worker failed; checking allocation':'Worker stopped; checking allocation';
+                r.ack_pending=true;
+            }
+            this.save(r);
+        }
+        if(r.ack_pending) {
+            // Best effort, retried by later syncs while the worker session exists.
+            try { await this.requestWorker(r.worker_url,'/task/remove',token,'POST',{uuid:r.uuid}); r.ack_pending=false; this.save(r); } catch(_) { /* retry on next sync */ }
+        }
     }
     async reconcile(r,token) {
         if(TERMINAL.has(r.state)) return r;
+        await this.pollWorker(r);
         let job;
         try {
             if(!r.tapis_job_uuid) {
@@ -201,7 +250,7 @@ class SplatTasks {
     async stop(r,token) {
         const api=this.sessions.get(r.uuid);
         if(r.worker_url && api) {
-            try { await this.requestWorker(r.worker_url,'/task/cancel',api,this.config.callbackPolicy,'POST',{uuid:r.uuid}); } catch(_) { /* Scheduler stop remains authoritative. */ }
+            try { await this.requestWorker(r.worker_url,'/task/cancel',api,'POST',{uuid:r.uuid}); } catch(_) { /* Scheduler stop remains authoritative. */ }
         }
         if(r.tapis_job_uuid) {
             try { await this.api(token).put(`/v3/jobs/${encodeURIComponent(r.tapis_job_uuid)}`,{operation:'stop'}); }
@@ -231,11 +280,6 @@ class SplatTasks {
             if(!this.config.enabled) fail(503,'disabled','NodeSplat training is disabled.');
             const match=/^Bearer ([^\s]+)$/.exec(req.headers.authorization||'');
             const token=match&&match[1];
-            if(req.method==='POST' && ['/splat/worker/register','/splat/worker/heartbeat'].includes(url.pathname)) {
-                const body=await readBody(req);
-                const value=await this.serialize(body.uuid,()=>url.pathname.endsWith('/register')?this.register(body,token):this.heartbeat(body,token));
-                reply(res,200,value); return true;
-            }
             const owner=await this.owner(token);
             if(req.method==='POST' && url.pathname==='/splat/task/new') {
                 const result=await this.create(await readBody(req),owner,token);
@@ -265,4 +309,4 @@ class SplatTasks {
         return true;
     }
 }
-module.exports={SplatTasks,defaults,regularFile};
+module.exports={SplatTasks,defaults,regularFile,resolveRoots};
