@@ -42,6 +42,23 @@ const shaFile = file => new Promise((resolve,reject) => {
     stream.on('data',chunk=>digest.update(chunk)); stream.on('error',reject); stream.on('end',()=>resolve(digest.digest('hex')));
 });
 
+// Shared-storage roots default to the media tree ClusterODX already maps for NodeODX
+// (node_shared_path_mappings["*"]: this host's view -> the node's view). Explicit profile values win.
+function resolveRoots(profile, mappings) {
+    const [source,target]=Object.entries((mappings && mappings['*']) || {})[0] || [];
+    const toNode=value => {
+        if(!value || !source || !target) return value;
+        const prefix=source.endsWith('/')?source:source+'/';
+        if(value!==source && !value.startsWith(prefix)) return value;
+        return path.posix.normalize(target+value.slice(source.length));
+    };
+    const inputRoot=profile.inputRoot || (source && path.posix.join(source,'splats','staging'));
+    const outputRoot=profile.outputRoot || (source && path.posix.join(source,'splats','output'));
+    return {inputRoot,outputRoot,
+        workerInputRoot:profile.workerInputRoot || toNode(inputRoot),
+        workerOutputRoot:profile.workerOutputRoot || toNode(outputRoot)};
+}
+
 class SplatTasks {
     constructor(options={}, dependencies={}) {
         this.config=Object.assign({},defaults,options);
@@ -51,6 +68,7 @@ class SplatTasks {
         this.sessions=new Map();
         this.operations=new Map();
         if(this.config.enabled) {
+            this.profile=Object.assign({},this.profile,resolveRoots(this.profile,dependencies.sharedPathMappings));
             const required=['baseUrl','tenantId','appId','appVersion','executionSystemId','archiveSystemId','queue','allocation','coresPerNode','memoryMB','maxMinutes','inputRoot','outputRoot','callbackUrl','workerBindHost','workerPort'];
             if(!this.config.instanceId || required.some(key=>!this.profile[key]) || this.profile.maxMinutes*60+600>this.config.workerLeaseSeconds) throw new Error('Incomplete NodeSplat fixed profile');
             const base=new URL(this.profile.baseUrl);
@@ -291,4 +309,4 @@ class SplatTasks {
         return true;
     }
 }
-module.exports={SplatTasks,defaults,regularFile};
+module.exports={SplatTasks,defaults,regularFile,resolveRoots};

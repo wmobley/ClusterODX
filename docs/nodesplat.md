@@ -41,10 +41,27 @@ ClusterODX base URL only (for example `https://clusterodm.tacc.utexas.edu`). The
 | `maxLogBytes` / `maxPageLines` / `maxPageBytes` | 50 MiB / 500 / 256 KiB |
 | `grantMaxAgeSeconds` / `workerLeaseSeconds` | 300 / 86400 |
 | `grantKeys` | `{}` — `{ "<issuer>": { "<key_id>": "<secret>" } }` |
-| `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `inputRoot`, `outputRoot`, `callbackUrl`, `workerBindHost`, `workerPort` |
+| `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `callbackUrl`, `workerBindHost`, `workerPort`. Optional shared-storage overrides: `inputRoot`, `outputRoot` (this host's view) and `workerInputRoot`, `workerOutputRoot` (the LS6 view) |
 
 Startup fails if `maxMinutes * 60 + 600 > workerLeaseSeconds`. There are no production
 defaults for any profile value. Secrets belong in deployment configuration only.
+
+### Shared storage (no paths to configure)
+
+By default the splat directories live under the shared media tree ClusterODX already maps for NodeODX
+(`node_shared_path_mappings["*"]`, this host's view -> the node's view). With the mapping
+`/corral/webodm/media` -> `/corral/utexas/BCS26030/webodm/media`:
+
+| | This host | LS6 worker |
+|---|---|---|
+| Input snapshots | `/corral/webodm/media/splats/staging/<run>/input` | `/corral/utexas/BCS26030/webodm/media/splats/staging/<run>/input` |
+| Results and console | `/corral/webodm/media/splats/output/<run>/` | `/corral/utexas/BCS26030/webodm/media/splats/output/<run>/` |
+
+WebODM must write to and read from those same physical directories: set `WO_OPENSPLAT_STAGING_ROOT`
+and `WO_OPENSPLAT_OUTPUT_ROOT` to `<WebODM's path to its media dir>/splats/staging` and
+`<...>/splats/output`. The directories must be writable by WebODM (staging) and by the LS6 job user
+(output). Setting any of the four profile keys overrides the derived value; a key outside the mapped
+tree is used as-is on both sides.
 
 ## Endpoints
 
