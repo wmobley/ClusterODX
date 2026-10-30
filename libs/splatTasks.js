@@ -48,8 +48,6 @@ class SplatTasks {
         this.profile=this.config.profile;
         this.api=dependencies.api || ((token) => axios.create({baseURL:this.profile.baseUrl,timeout:60000,maxRedirects:0,headers:{'X-Tapis-Token':token}}));
         this.requestWorker=dependencies.workerRequest || workerRequest;
-        // Same secret NodeODX workers register with; resolved lazily so config reloads are honored.
-        this.registrationSecret=dependencies.registrationSecret || (() => this.config.registrationSecret || '');
         this.sessions=new Map();
         this.operations=new Map();
         if(this.config.enabled) {
@@ -93,9 +91,9 @@ class SplatTasks {
         this.operations.set(id,current);
         try { return await current; } finally { if(this.operations.get(id)===current) this.operations.delete(id); }
     }
-    buildJob(r,api,secret) {
+    buildJob(r,api) {
         const p=this.profile;
-        const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_REGISTRATION_SECRET:secret,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
+        const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
         return {name:r.job_name,appId:p.appId,appVersion:p.appVersion,execSystemId:p.executionSystemId,execSystemLogicalQueue:p.queue,archiveSystemId:p.archiveSystemId,nodeCount:1,coresPerNode:p.coresPerNode,memoryMB:p.memoryMB,maxMinutes:p.maxMinutes,archiveOnAppError:true,parameterSet:{appArgs:p.appArgs||[],envVariables:Object.keys(env).map(key=>({key,value:env[key]})),schedulerOptions:[{name:'TACC Allocation',arg:`-A ${p.allocation}`}]}};
     }
     async create(body,owner,token) {
@@ -115,14 +113,12 @@ class SplatTasks {
         // Recheck after async hashing so concurrent create requests cannot exceed capacity.
         if(this.store.all().some(r=>r.run_id===body.run_id)) return this.create(body,owner,token);
         if(this.store.all().filter(r=>!TERMINAL.has(r.state)).length>=this.config.maxConcurrentRuns) fail(429,'capacity','The GPU training profile is busy.');
-        const registrationSecret=this.registrationSecret();
-        if(typeof registrationSecret!=='string' || !registrationSecret) fail(503,'unavailable','Training service is temporarily unavailable.');
         const api=random();
         const r={version:1,uuid:uuid(),owner,run_id:body.run_id,source_task_id:body.source_task_id,manifest_sha256:body.manifest_sha256,profile_id:body.profile_id,settings:body.settings,request_hash:requestHash,grant_hash:grantHash,state:'submitting',phase:'Submitting GPU worker',tapis_job_uuid:null,cancel_pending:false,api_hash:hash(api),lease_expires_at:Date.now()+this.config.workerLeaseSeconds*1000};
         r.job_name=`nodesplat-${r.uuid}`;
         this.save(r);
         try {
-            const response=await this.api(token).post('/v3/jobs/submit',this.buildJob(r,api,registrationSecret));
+            const response=await this.api(token).post('/v3/jobs/submit',this.buildJob(r,api));
             const result=response.data && response.data.result;
             if(!result || !result.uuid) throw new Error('Uncertain Tapis response');
             r.tapis_job_uuid=result.uuid;
@@ -140,13 +136,12 @@ class SplatTasks {
         return {status:202,record:r};
     }
     // NodeODX-style webhook registration (adminweb /webhook/register-node, role "nodesplat").
-    // Authenticated by the shared registration secret and bound to one exact pending task/job.
+    // Authenticated by the per-job worker token (only its hash is stored) and bound to one exact pending task/job;
+    // no cluster-wide secret is placed in the job environment.
     // It is an idempotent keepalive: a ClusterODX restart drops the in-memory worker token and
     // the next registration restores it. Never touches the generic node registry.
     async registerWorker(reg) {
         if(!this.config.enabled) fail(404,'disabled','NodeSplat training is disabled.');
-        const secret=this.registrationSecret();
-        if(!secret || typeof reg.registrationSecret!=='string' || !reg.registrationSecret || !same(hash(secret),hash(reg.registrationSecret))) fail(401,'invalid_registration','Worker registration secret is invalid.');
         const token=typeof reg.nodeToken==='string'?reg.nodeToken:'';
         const denied=()=>fail(403,'invalid_registration','Worker registration is not authorized.');
         if(!UUID.test(reg.registrationUuid||'')) denied();

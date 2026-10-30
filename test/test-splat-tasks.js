@@ -57,9 +57,9 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         if(/^\/task\/[^/]+\/info$/.test(route)) { if(!workerInfo) throw new Error('worker unavailable'); return workerInfo; }
         return {success:true};
     };
-    const deps={api,workerRequest:requestWorker,registrationSecret:()=>REG_SECRET};
+    const deps={api,workerRequest:requestWorker};
     const reg=async(service,id,patch={})=> {
-        try { return {status:200,body:await service.registerWorker(Object.assign({hostname:HOST,port:4444,nodeToken:env.NODESPLAT_API_CAPABILITY,registrationSecret:REG_SECRET,registrationUuid:id,tapisJobUuid:job.uuid,role:'nodesplat'},patch))}; }
+        try { return {status:200,body:await service.registerWorker(Object.assign({hostname:HOST,port:4444,nodeToken:env.NODESPLAT_API_CAPABILITY,registrationUuid:id,tapisJobUuid:job.uuid,role:'nodesplat'},patch))}; }
         catch(error) { return {status:error.status,body:{error:error.message}}; }
     };
     const newRun=()=> {
@@ -85,8 +85,8 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         assert.strictEqual(created.status,202);assert.strictEqual(created.body.state,'queued');
         const id=created.body.uuid;
         assert.strictEqual(submissions,1);
-        // Worker credentials: shared registration secret + per-job API token; no callback capability.
-        assert.strictEqual(env.NODESPLAT_REGISTRATION_SECRET,REG_SECRET);
+        // Worker credential is the per-job API token only: no cluster-wide secret and no callback capability reach the job.
+        assert.strictEqual(env.NODESPLAT_REGISTRATION_SECRET,undefined);assert(!Object.values(env).includes(REG_SECRET));
         assert.strictEqual(env.NODESPLAT_CALLBACK_URL,'https://cluster.invalid');
         assert(!('NODESPLAT_CALLBACK_CAPABILITY' in env));
         const persisted=fs.readFileSync(path.join(config.storeDir,id+'.json'),'utf8');
@@ -99,9 +99,8 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         for(const route of ['/splat/worker/register','/splat/worker/heartbeat']) assert.strictEqual((await call(service,'POST',route,{uuid:id})).status,404);
 
         // Webhook registration rejections
-        assert.strictEqual((await reg(service,id,{registrationSecret:'wrong'})).status,401);
-        assert.strictEqual((await reg(service,id,{registrationSecret:''})).status,401);
-        assert.strictEqual((await reg(service,id,{registrationSecret:undefined})).status,401);
+        // The cluster-wide NodeODX secret does not authenticate a splat worker; only the per-job token does
+        assert.strictEqual((await reg(service,id,{nodeToken:undefined,registrationSecret:REG_SECRET})).status,403);
         assert.strictEqual((await reg(service,id,{tapisJobUuid:'another-job'})).status,403);
         assert.strictEqual((await reg(service,id,{tapisJobUuid:undefined})).status,403);
         assert.strictEqual((await reg(service,id,{nodeToken:'x'.repeat(43)})).status,403);
@@ -112,10 +111,6 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         assert.strictEqual((await reg(service,id,{port:0})).status,400);
         assert.strictEqual((await reg(service,id,{port:'4444'})).status,400);
         assert.strictEqual(newCalls,0);
-        // No secret configured on the cluster: nothing registers
-        const noSecret=new SplatTasks(Object.assign({},config,{storeDir:path.join(root,'store-nosecret')}),Object.assign({},deps,{registrationSecret:()=>''}));
-        try { assert.strictEqual((await reg(noSecret,id)).status,401); } finally { noSecret.close(); }
-
         // Valid registration, then idempotent keepalive and conflicting identity
         let result=await reg(service,id);
         assert.strictEqual(result.status,200);assert.deepStrictEqual(result.body,{success:true,uuid:id});
@@ -203,15 +198,6 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         const result=await reg(unknown,created.body.uuid,{tapisJobUuid:'accepted-tapis-job',nodeToken:'x'});
         assert.strictEqual(result.status,409);assert.strictEqual(stored.tapis_job_uuid,null);
     } finally {failSubmit=false;unknown.close();}
-
-    // No registration secret configured: task creation fails closed and never submits
-    const before=submissions;
-    const sealed=new SplatTasks(Object.assign({},config,{storeDir:path.join(root,'store-sealed')}),Object.assign({},deps,{registrationSecret:()=>''}));
-    try {
-        const refused=await call(sealed,'POST','/splat/task/new',newRun());
-        assert.strictEqual(refused.status,503);assert.strictEqual(refused.body.error.code,'unavailable');
-        assert.strictEqual(submissions,before);
-    } finally {sealed.close();}
 
     // Worker URL shape only (same trust model as NodeODX); no allowlist
     assert.strictEqual(parseWorkerUrl('http://c301-001.ls6.tacc.utexas.edu:3101/').port,'3101');

@@ -45,7 +45,7 @@ const request = (port, body) => new Promise((resolve, reject) => {
         memoryMB: 1, maxMinutes: 10, inputRoot: root, outputRoot: root, callbackUrl: 'https://cluster.invalid',
         workerBindHost: '0.0.0.0', workerPort: 3101};
     const splat = new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(root, 'store'), profile},
-        {registrationSecret: () => SECRET, workerRequest: async (url, route, token, method, body) => {
+        {workerRequest: async (url, route, token, method, body) => {
             calls.push({url, route, token, method, body});
             return route === '/info' ? {engine: 'nodesplat', capabilities: ['opensplat-webodm-v1']} : {uuid: body['set-uuid']};
         }});
@@ -60,7 +60,7 @@ const request = (port, body) => new Promise((resolve, reject) => {
     const server = await adminweb.create({port: 0});
     const port = server.address().port;
     const splatBody = patch => Object.assign({hostname: 'c301-001.ls6.tacc.utexas.edu', port: 3101, token: apiToken,
-        registrationSecret: SECRET, tapisJobUuid: 'tapis-job-1', registrationUuid: id, role: 'nodesplat', nodeReady: true}, patch);
+        tapisJobUuid: 'tapis-job-1', registrationUuid: id, role: 'nodesplat', nodeReady: true}, patch);
     const nodeCount = nodes.all().length;
     const originalAdd = routetable.add, originalDelete = tasktable.delete;
     let genericTouched = 0;
@@ -75,9 +75,8 @@ const request = (port, body) => new Promise((resolve, reject) => {
         assert.strictEqual((await request(port, splatBody())).status, 404);
         holder.instance = splat;
 
-        // Same authentication contract as NodeODX secret registration, plus exact task/job/token binding
-        assert.strictEqual((await request(port, splatBody({registrationSecret: 'wrong'}))).status, 401);
-        assert.strictEqual((await request(port, splatBody({registrationSecret: undefined}))).status, 401);
+        // Per-job token plus exact task/job binding; the cluster-wide NodeODX secret does not authenticate a splat worker
+        assert.strictEqual((await request(port, splatBody({token: undefined, registrationSecret: SECRET}))).status, 403);
         assert.strictEqual((await request(port, splatBody({tapisJobUuid: 'other-job'}))).status, 403);
         assert.strictEqual((await request(port, splatBody({token: 'x'.repeat(43)}))).status, 403);
         assert.strictEqual((await request(port, splatBody({registrationUuid: crypto.randomUUID()}))).status, 403);
