@@ -30,6 +30,7 @@
         "requireStaff": true,
         "timeoutMs": 10000
     },
+    "splat": { "enabled": false },
     "tapis_debug": false,
     "node_shared_path_mappings": {
         "*": {

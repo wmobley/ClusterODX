@@ -68,6 +68,7 @@ const routetable = require('./libs/routetable');
     const proxies = await proxy.initialize(cloudProvider);
 
     const gracefulShutdown = async() => {
+        if (proxy.splatTasks) proxy.splatTasks.close();
         await nodes.cleanup();
         await routetable.cleanup();
         
