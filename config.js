@@ -157,6 +157,9 @@ const mergeWebodmConfig = () => {
 };
 
 config.webodm = mergeWebodmConfig();
+// Dedicated NodeSplat namespace; never alters the NodeODX autoscaler profile.
+config.splat = Object.assign({}, require('./libs/splatTasks').defaults,
+    defaultConfig.splat || {}, userConfig.splat || {});
 
 if (!config.tmp_dir || config.tmp_dir.length === 0) config.tmp_dir = 'tmp';
 
