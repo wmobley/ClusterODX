@@ -45,8 +45,15 @@ module.exports = {
         utils.cleanupTemporaryDirectory(config.stale_uploads_timeout);
         await routetable.initialize();
         await tasktable.initialize();
-        const splatTasks = new (require('./splatTasks').SplatTasks)(config.splat);
+        // Same shared secret NodeODX workers use to register (see adminweb /webhook/register-node).
+        const registrationSecret = () => {
+            const provider = asrProvider.get();
+            return config.registration_secret ||
+                (provider && typeof provider.getConfig === 'function' ? provider.getConfig('worker.registrationSecret', '') : '') || '';
+        };
+        const splatTasks = new (require('./splatTasks').SplatTasks)(config.splat, {registrationSecret});
         module.exports.splatTasks = splatTasks;
+        require('./splatInstance').instance = splatTasks;
 
         setInterval(() => {
             utils.cleanupTemporaryDirectory(config.stale_uploads_timeout);

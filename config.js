@@ -78,7 +78,7 @@ Options:
     --debug 	Disable caches and other settings to facilitate debug (default: false)
     --ssl-key <file>	Path to .pem SSL key file
     --ssl-cert <file>	Path to SSL .pem certificate
-    --splat-config <file>	Path to the NodeSplat configuration (the 'splat' block: profile, grantKeys, callbackPolicy). Keep it mode 0600; it holds grant secrets. Takes precedence over a 'splat' block in --config (default: none)
+    --splat-config <file>	Path to the NodeSplat configuration (the 'splat' block: profile, grantKeys). Keep it mode 0600; it holds grant secrets. Takes precedence over a 'splat' block in --config (default: none)
     --asr <file>	Path to configuration for enabling the autoscaler. This is combined with the provider's default configuration (default: none)
     --access-log <file>	Path where to store access log file (default: none)
     
