@@ -18,7 +18,7 @@ secrets. The file contains the block's keys directly (not wrapped in `"splat": {
   "enabled": true,
   "instanceId": "clusterodx-tacc",
   "grantKeys": { "webodm": { "wo-2026-10": "<secret>" } },
-  "callbackPolicy": { "schemes": ["https"], "hosts": ["<callback host>"], "cidrs": ["<worker CIDR>"], "ports": [<worker port>] },
+  "callbackPolicy": { "schemes": ["http"], "hosts": ["*.ls6.tacc.utexas.edu"], "cidrs": ["<LS6 compute CIDR>"], "ports": [<worker port>] },
   "profile": { "...": "see the table below" }
 }
 ```
@@ -42,7 +42,7 @@ and `/splat/worker/heartbeat` itself.
 | `maxLogBytes` / `maxPageLines` / `maxPageBytes` | 50 MiB / 500 / 256 KiB |
 | `grantMaxAgeSeconds` / `workerLeaseSeconds` | 300 / 86400 |
 | `grantKeys` | `{}` — `{ "<issuer>": { "<key_id>": "<secret>" } }` |
-| `callbackPolicy` | `{schemes:[],hosts:[],cidrs:[],ports:[]}` — empty fails closed |
+| `callbackPolicy` | `{schemes:[],hosts:[],cidrs:[],ports:[]}` — empty fails closed. Allowlist for ClusterODX's connections **to the worker** (the URL the worker registers, `<scheme>://<node hostname>:<port>/`). `hosts` takes exact names or `*.suffix` (one extra label, e.g. `*.ls6.tacc.utexas.edu`); every address the name resolves to must be inside `cidrs`; the port must be listed. No redirects are followed |
 | `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `inputRoot`, `outputRoot`, `callbackUrl`, `workerBindHost`, `workerPort` |
 
 Startup fails if `maxMinutes * 60 + 600 > workerLeaseSeconds`. There are no production

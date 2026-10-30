@@ -99,6 +99,12 @@ async function call(service,method,url,body,bearer=token()) {
         assert.strictEqual(stops,0);
     } finally {service.close();}
     assert(inCidr('10.2.3.4','10.0.0.0/8'));assert(!inCidr('169.254.169.254','10.0.0.0/8'));
+    const {hostAllowed}=require('../libs/splatNetwork');
+    assert(hostAllowed('c301-001.ls6.tacc.utexas.edu',['*.ls6.tacc.utexas.edu']));
+    assert(hostAllowed('Worker.Invalid',['worker.invalid']));
+    for(const bad of ['ls6.tacc.utexas.edu','a.b.ls6.tacc.utexas.edu','evil-ls6.tacc.utexas.edu','c1.ls6.tacc.utexas.edu.evil.com','.ls6.tacc.utexas.edu'])
+        assert(!hostAllowed(bad,['*.ls6.tacc.utexas.edu']),bad);
+    assert(!hostAllowed('anything.example',['*.']) && !hostAllowed('anything.example',['*']) && !hostAllowed('a.example',['*.*.example']));
     await assert.rejects(()=>targetFor('http://169.254.169.254/',{schemes:['http'],hosts:['worker.invalid'],ports:[80],cidrs:['10.0.0.0/8']}));
     const disabled=new SplatTasks();assert.strictEqual((await call(disabled,'POST','/splat/task/new',{})).status,503);
     console.log('NodeSplat authorization, durable lifecycle, restart, artifact and console tests passed');
