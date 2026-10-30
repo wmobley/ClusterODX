@@ -94,6 +94,13 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         assert.strictEqual((await call(service,'POST','/splat/task/new',Object.assign({},body,{grant:grant(body,'operator',true)}))).status,200);
         assert.strictEqual(submissions,1);
         assert.strictEqual((await call(service,'GET',`/splat/task/${id}/info`,undefined,token('other'))).status,403);
+        // Lookup by WebODM run id: recovers the task id for a run whose submission outcome is unknown
+        const found=await call(service,'GET',`/splat/run/${body.run_id}`);
+        assert.strictEqual(found.status,200);assert.strictEqual(found.body.uuid,id);assert.strictEqual(found.body.run_id,body.run_id);
+        assert.strictEqual((await call(service,'GET',`/splat/run/${uuid()}`)).status,404);
+        assert.strictEqual((await call(service,'GET','/splat/run/not-a-uuid')).status,404);
+        assert.strictEqual((await call(service,'GET',`/splat/run/${body.run_id}`,undefined,token('other'))).status,403);
+        assert.strictEqual((await call(service,'GET',`/splat/run/${body.run_id}`,undefined,'')).status,401);
         assert.strictEqual((await call(service,'GET',`/splat/task/${id}/output?line=-1`)).status,400);
         // The old unauthenticated worker routes no longer exist.
         for(const route of ['/splat/worker/register','/splat/worker/heartbeat']) assert.strictEqual((await call(service,'POST',route,{uuid:id})).status,404);
