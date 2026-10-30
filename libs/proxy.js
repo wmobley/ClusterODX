@@ -45,7 +45,7 @@ module.exports = {
         utils.cleanupTemporaryDirectory(config.stale_uploads_timeout);
         await routetable.initialize();
         await tasktable.initialize();
-        const splatTasks = new (require('./splatTasks').SplatTasks)(config.splat);
+        const splatTasks = new (require('./splatTasks').SplatTasks)(config.splat, {sharedPathMappings: config.node_shared_path_mappings});
         module.exports.splatTasks = splatTasks;
         require('./splatInstance').instance = splatTasks;
 
