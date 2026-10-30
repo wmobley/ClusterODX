@@ -45,6 +45,8 @@ module.exports = {
         utils.cleanupTemporaryDirectory(config.stale_uploads_timeout);
         await routetable.initialize();
         await tasktable.initialize();
+        const splatTasks = new (require('./splatTasks').SplatTasks)(config.splat);
+        module.exports.splatTasks = splatTasks;
 
         setInterval(() => {
             utils.cleanupTemporaryDirectory(config.stale_uploads_timeout);
@@ -232,6 +234,9 @@ module.exports = {
             try{
                 const urlParts = url.parse(req.url, true);
                 const { query, pathname } = urlParts;
+                // Own auth and routes: NodeSplat is never inserted into generic nodes.
+                // Keep bearer credentials out of legacy URL/access-log handling.
+                if (await splatTasks.handle(req, res)) return;
                 
                 if (publicPath(pathname)){
                     forwardToReferenceNode(req, res);
