@@ -118,7 +118,7 @@ module.exports = {
         task_id: registration.registrationUuid
       });
 
-      // NodeSplat workers use this same webhook and shared secret, but are handled entirely by the
+      // NodeSplat workers use this same webhook, authenticated by their per-job token, but are handled entirely by the
       // dedicated splat store: they are never added to the node registry, route table or task table.
       if (registration.role === "nodesplat") {
         const splatTasks = require("./libs/splatInstance").instance;

@@ -5,7 +5,7 @@ const {fail} = require('./splatAuth');
 
 // Same trust model as NodeODX: the worker registers its own host:port through the
 // authenticated webhook and ClusterODX connects to it. Destination checks are limited
-// to the URL shape; the registration secret and job binding are the trust boundary.
+// to the URL shape; the per-job worker token and exact task/job binding are the trust boundary.
 function parseWorkerUrl(raw) {
     let target;
     try { target = new URL(raw); } catch (_) { fail(403, 'worker_destination', 'Worker destination is not allowed.'); }

@@ -59,12 +59,10 @@ Tapis could not be reached.
   reconciliation), `GET /splat/task/:uuid/output?line=N`,
   `GET /splat/task/:uuid/download/{model.ply,manifest.json,console.txt}`,
   `POST /splat/task/cancel` — 202 `cancel_pending` until the allocation is confirmed stopped.
-- `POST /webhook/register-node` with `role: "nodesplat"` — the same webhook and shared
-  registration secret NodeODX workers use (`config.registration_secret` or
-  `worker.registrationSecret` in `tapis-config.json`). NodeSplat workers send
-  `{hostname, port, token, registrationSecret, tapisJobUuid, registrationUuid, role, nodeReady}`
+- `POST /webhook/register-node` with `role: "nodesplat"` — the same webhook NodeODX workers use. A NodeSplat worker authenticates with its per-job token, not the cluster-wide NodeODX registration secret, and sends
+  `{hostname, port, token, tapisJobUuid, registrationUuid, role, nodeReady}`
   every 30 seconds; it is an idempotent keepalive, so a ClusterODX restart (which drops the
-  in-memory worker token) is repaired by the next one. The secret is checked in constant time and
+  in-memory worker token) is repaired by the next one. The token hash is compared in constant time and
   the request must match one exact non-terminal splat task: its UUID (`registrationUuid`), its
   recorded Tapis job UUID and the per-job worker API token (hash-only in the record). A task
   whose job UUID is not recorded yet gets 409 so the worker retries. These workers are handled
@@ -80,8 +78,8 @@ the worker reports `result_ready`, ClusterODX verifies the published artifacts, 
 until it succeeds). A worker-reported failure or cancel is acknowledged the same way, and the
 Tapis allocation result decides the final state.
 
-Task creation returns 503 and never submits if no registration secret is configured. The job
-receives `NODESPLAT_REGISTRATION_SECRET`, `NODESPLAT_API_CAPABILITY` and `NODESPLAT_CALLBACK_URL`.
+The job receives `NODESPLAT_API_CAPABILITY` (random per job; only its hash is stored by ClusterODX) and
+`NODESPLAT_CALLBACK_URL`. No cluster-wide secret is placed in the job environment.
 
 ## Recovery and logs
 
@@ -95,4 +93,4 @@ run's shared output directory, so it remains available after the worker exits.
 - `signin_required` / 401: the Tapis session is invalid or expired for this tenant.
 - `tapis_forbidden` / 403: Tapis denied the app, system or allocation.
 - `capacity` / 429: another NodeSplat run is active.
-- `invalid_registration` / 401, 403: wrong registration secret, or the task/job/token do not match an active attempt. 409 `job_not_bound` means retry shortly.
+- `invalid_registration` / 401, 403: the task, job or per-job token do not match an active attempt. 409 `job_not_bound` means retry shortly.
