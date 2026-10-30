@@ -13,6 +13,13 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-7}"
 LOG_FILE="${LOG_DIR}/clusterodx$(date +%Y%m%d).log"
 ASR_CONFIG="tapis-config.json"
 NODE_CONFIG="${NODE_CONFIG:-clusterodx-config.json}"
+# Optional NodeSplat profile (mode 0600; holds grant secrets). Used only if the file exists.
+SPLAT_CONFIG="${SPLAT_CONFIG:-splat-config.json}"
+SPLAT_ARGS=()
+if [[ -f "${SPLAT_CONFIG}" ]]; then
+    chmod 600 "${SPLAT_CONFIG}"
+    SPLAT_ARGS=(--splat-config "${SPLAT_CONFIG}")
+fi
 
 if [[ ! -f "${ASR_CONFIG}" ]]; then
     echo "ASR config ${ASR_CONFIG} not found. Please create it before running restart.sh."
@@ -79,6 +86,7 @@ start_clusterodx() {
     node index.js \
         --asr "${ASR_CONFIG}" \
         --config "${NODE_CONFIG}" \
+        ${SPLAT_ARGS[@]+"${SPLAT_ARGS[@]}"} \
         --port "${PORT}" \
         --admin-cli-port "${ADMIN_CLI_PORT}" \
         --admin-web-port "${ADMIN_WEB_PORT}" \

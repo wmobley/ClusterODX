@@ -36,7 +36,7 @@ let argDefs = {
             'cloud-provider', 'downloads-from-s3', 'token', 'log-level',
             'upload-max-speed', 'ssl-key', 'ssl-cert', 'secure-port',
             'public-address', 'config', 'admin-session-secret',
-            'asr', 'registration-secret', 'webodm-base-url',
+            'asr', 'splat-config', 'registration-secret', 'webodm-base-url',
             'admin-web-allowed-tenants', 'admin-web-allowed-users', 'tmp-dir'],
     boolean: ['splitmerge', 'debug', 'allow-local-download-bypass',
               'force-node-downloads', 'webodm-require-staff', 'admin-web-use-tapis-jwt'],
@@ -78,6 +78,7 @@ Options:
     --debug 	Disable caches and other settings to facilitate debug (default: false)
     --ssl-key <file>	Path to .pem SSL key file
     --ssl-cert <file>	Path to SSL .pem certificate
+    --splat-config <file>	Path to the NodeSplat configuration (the 'splat' block: profile, grantKeys, callbackPolicy). Keep it mode 0600; it holds grant secrets. Takes precedence over a 'splat' block in --config (default: none)
     --asr <file>	Path to configuration for enabling the autoscaler. This is combined with the provider's default configuration (default: none)
     --access-log <file>	Path where to store access log file (default: none)
     
@@ -158,8 +159,18 @@ const mergeWebodmConfig = () => {
 
 config.webodm = mergeWebodmConfig();
 // Dedicated NodeSplat namespace; never alters the NodeODX autoscaler profile.
+let splatFileConfig = {};
+if (argv['splat-config']){
+    try{
+        splatFileConfig = JSON.parse(fs.readFileSync(argv['splat-config']).toString());
+    }catch(e){
+        // A named but unreadable file must not silently leave NodeSplat unconfigured.
+        console.warn(`${argv['splat-config']} not found or invalid: ${e.message}`);
+        process.exit(1);
+    }
+}
 config.splat = Object.assign({}, require('./libs/splatTasks').defaults,
-    defaultConfig.splat || {}, userConfig.splat || {});
+    defaultConfig.splat || {}, userConfig.splat || {}, splatFileConfig);
 
 if (!config.tmp_dir || config.tmp_dir.length === 0) config.tmp_dir = 'tmp';
 

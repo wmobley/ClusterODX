@@ -6,7 +6,31 @@ registry, so photogrammetry scheduling, retries, shared-submodel selection and `
 unaffected (`test/test-splat-partition.js`). Design:
 `docs/design/2026-10-30-nodesplat-worker.md` in the suite root.
 
-## Configuration (`config.json` → `splat`)
+## Configuration (`splat-config.json`)
+
+Put the `splat` block in its own file, passed with `--splat-config <file>`, in the same way as
+`--asr tapis-config.json`. `restart.sh` uses `splat-config.json` automatically when it exists
+(override with `SPLAT_CONFIG=<file>`) and sets it to mode 0600, because it holds the grant
+secrets. The file contains the block's keys directly (not wrapped in `"splat": {}`):
+
+```json
+{
+  "enabled": true,
+  "instanceId": "clusterodx-tacc",
+  "grantKeys": { "webodm": { "wo-2026-10": "<secret>" } },
+  "callbackPolicy": { "schemes": ["https"], "hosts": ["<callback host>"], "cidrs": ["<worker CIDR>"], "ports": [<worker port>] },
+  "profile": { "...": "see the table below" }
+}
+```
+
+A `"splat"` block inside the `--config` file still works; keys in `--splat-config` take
+precedence. A named file that is missing or invalid stops startup. This file is separate from
+the NodeODX autoscaler profile (`tapis-config.json`), which NodeSplat never reads, so its
+image-count queue mapping cannot affect GPU training. `profile.callbackUrl` is the ClusterODX
+base URL only (for example `https://host:port`); the worker appends `/splat/worker/register`
+and `/splat/worker/heartbeat` itself.
+
+### Keys
 
 | Key | Default |
 |---|---|
