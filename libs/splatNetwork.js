@@ -18,12 +18,24 @@ function inCidr(address, cidr) {
     const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
     return ((value & mask) >>> 0) === ((root & mask) >>> 0);
 }
+// Exact names, or "*.suffix" for exactly one extra leading label (a compute node under a cluster
+// domain). The resolved-address CIDR check below stays the authoritative guard.
+function hostAllowed(hostname, patterns) {
+    const host = hostname.toLowerCase();
+    return patterns.some(pattern => {
+        pattern = String(pattern).toLowerCase();
+        if (!pattern.startsWith('*.')) return pattern === host;
+        const suffix = pattern.slice(1);
+        const label = host.slice(0, -suffix.length);
+        return suffix.length > 1 && !suffix.includes('*') && host.endsWith(suffix) && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(label);
+    });
+}
 async function targetFor(raw, policy) {
     let target;
     try { target = new URL(raw); } catch (_) { fail(403, 'worker_destination', 'Worker destination is not allowed.'); }
     const scheme = target.protocol.slice(0,-1);
     const port = Number(target.port || (scheme === 'https' ? 443 : 80));
-    if (target.username || target.password || target.search || target.hash || target.pathname !== '/' || !policy.schemes.includes(scheme) || !policy.hosts.includes(target.hostname) || !policy.ports.map(Number).includes(port)) fail(403, 'worker_destination', 'Worker destination is not allowed.');
+    if (target.username || target.password || target.search || target.hash || target.pathname !== '/' || !policy.schemes.includes(scheme) || !hostAllowed(target.hostname, policy.hosts) || !policy.ports.map(Number).includes(port)) fail(403, 'worker_destination', 'Worker destination is not allowed.');
     const addresses = await dns.lookup(target.hostname, {all:true});
     if (!addresses.length || addresses.some(entry => !policy.cidrs.some(cidr => inCidr(entry.address,cidr)))) fail(403, 'worker_destination', 'Worker address is not allowed.');
     return {target, address: addresses[0], port};
@@ -53,4 +65,4 @@ async function workerRequest(raw, pathname, token, policy, method='GET', body) {
         request.end();
     });
 }
-module.exports={inCidr,targetFor,workerRequest};
+module.exports={inCidr,hostAllowed,targetFor,workerRequest};
