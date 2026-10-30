@@ -14,6 +14,14 @@ const defaults = {
     maxResultBytes:8*1024*1024*1024, grantMaxAgeSeconds:300, workerLeaseSeconds:86400,
     grantKeys:{}, profile:{}
 };
+// Operator-facing log lines. Never pass tokens, secrets or request bodies here.
+const log = (level, message) => { try { require('./logger')[level]('[NODESPLAT] ' + message); } catch (_) { /* logging must never break a request */ } };
+// Tapis explains a rejected request in response.data.message; keep a short, token-free version of it.
+const tapisDetail = error => {
+    const data = error && error.response && error.response.data;
+    const message = data && typeof data.message === 'string' ? data.message : '';
+    return message.replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[token]').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 300);
+};
 const TERMINAL = new Set(['ready','failed','canceled']);
 const random = () => crypto.randomBytes(32).toString('base64url');
 const uuid = () => require('uuid/v4')();
@@ -142,13 +150,17 @@ class SplatTasks {
             r.tapis_job_uuid=result.uuid;
             r.state=r.cancel_pending?'cancel_pending':'queued';
             r.phase=r.cancel_pending?'Stopping GPU worker':'Waiting for GPU worker';
+            log('info',`task ${r.uuid} run ${r.run_id}: Tapis accepted job ${r.tapis_job_uuid}`);
         } catch(error) {
             const status=error.response && error.response.status;
             if(status && status<500) {
+                const detail=tapisDetail(error);
                 r.state='failed'; r.phase='Submission rejected';
-                r.error={code:status===401?'signin_required':status===403?'tapis_forbidden':'submission_rejected',message:status===401?'Tapis rejected your session. Please sign in again.':status===403?'Tapis denied access to the GPU app or system.':`Tapis rejected the job (HTTP ${status}).`};
+                r.error={code:status===401?'signin_required':status===403?'tapis_forbidden':'submission_rejected',message:status===401?'Tapis rejected your session. Please sign in again.':`${status===403?'Tapis denied access to the GPU app or system':`Tapis rejected the job (HTTP ${status})`}${detail?`: ${detail}`:''}${detail&&/[.!?]$/.test(detail)?'':'.'}`};
                 r.revoked=true;
-            } else { r.state=r.cancel_pending?'cancel_pending':'submission_unknown'; r.phase='Checking whether Tapis accepted the worker'; }
+                log('warn',`task ${r.uuid} run ${r.run_id}: Tapis rejected the job (HTTP ${status})${detail?`: ${detail}`:''}`);
+            } else { r.state=r.cancel_pending?'cancel_pending':'submission_unknown'; r.phase='Checking whether Tapis accepted the worker';
+                log('warn',`task ${r.uuid} run ${r.run_id}: Tapis submission outcome unknown (${status||'no response'})`); }
         }
         this.save(r);
         return {status:202,record:r};
@@ -179,6 +191,7 @@ class SplatTasks {
             const result=await this.requestWorker(url,'/task/new',token,'POST',{run_id:r.run_id,source_task_id:r.source_task_id,manifest_sha256:r.manifest_sha256,settings:r.settings,'set-uuid':r.uuid});
             if(result.uuid!==r.uuid) fail(409,'worker_identity','Worker task identity does not match.');
             r.worker_started=true;
+            log('info',`task ${r.uuid}: worker registered at ${url} and started`);
             if(!TERMINAL.has(r.state) && r.state!=='cancel_pending' && r.state!=='result_ready') { r.state='running'; r.phase='Preparing training inputs'; }
             this.save(r);
             return {success:true,uuid:r.uuid};
@@ -208,6 +221,7 @@ class SplatTasks {
                 try {
                     await this.verifyArtifacts(r);
                     r.state='result_ready'; r.phase='Training complete; releasing GPU worker'; r.ack_pending=true;
+                    log('info',`task ${r.uuid}: result_ready, artifacts verified`);
                 } catch(_) { r.phase='Training artifacts failed verification'; }
             } else if(code===30 || code===50) {
                 r.worker_terminal=code===30?'failed':'canceled';
