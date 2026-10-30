@@ -37,13 +37,14 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
     const profile={baseUrl:'https://example.tapis.invalid',tenantId:'portals',appId:'nodesplat-ls6',appVersion:'0.1.0',executionSystemId:'ls6',archiveSystemId:'cloud.data',queue:'gpu-test',allocation:'TEST',coresPerNode:1,memoryMB:4096,maxMinutes:10,inputRoot,outputRoot,callbackUrl:'https://cluster.invalid',workerBindHost:'0.0.0.0',workerPort:4444};
     // A leftover callbackPolicy from an older config file is tolerated and ignored.
     const config={enabled:true,instanceId:'test-cluster',storeDir:path.join(root,'store'),grantKeys:{webodm:{test:secret}},callbackPolicy:{schemes:[],hosts:[],cidrs:[],ports:[]},profile};
-    let submissions=0,stops=0,jobStatus='RUNNING',job,env,newCalls=0,removeCalls=0,removeFails=false,failSubmit=false,workerInfo=null;
+    let rejectBody=null,submissions=0,stops=0,jobStatus='RUNNING',job,env,newCalls=0,removeCalls=0,removeFails=false,failSubmit=false,workerInfo=null;
     const api=()=>({get:async url=> {
         if(url==='/v3/systems') return {data:{result:[]}};
         if(url==='/v3/jobs/search') return {data:{result:job?[job]:[]}};
         return {data:{result:Object.assign({},job,{status:jobStatus})}};
     },post:async (_url,spec)=> {
         if(failSubmit) { const error=new Error('boom'); error.response={status:500}; throw error; }
+        if(rejectBody) { const error=new Error('bad'); error.response={status:400,data:{message:rejectBody}}; throw error; }
         submissions++; env=Object.fromEntries(spec.parameterSet.envVariables.map(e=>[e.key,e.value]));
         assert(!Object.values(env).includes(token()));
         job={uuid:'accepted-tapis-job',name:spec.name,appId:spec.appId,appVersion:spec.appVersion,owner:'operator'};
@@ -205,6 +206,20 @@ const HOST='c301-001.ls6.tacc.utexas.edu';
         const result=await reg(unknown,created.body.uuid,{tapisJobUuid:'accepted-tapis-job',nodeToken:'x'});
         assert.strictEqual(result.status,409);assert.strictEqual(stored.tapis_job_uuid,null);
     } finally {failSubmit=false;unknown.close();}
+
+    // A Tapis rejection explains itself: its message reaches the task, with tokens removed and length bounded
+    const rejectedDir=path.join(root,'store-rejected');
+    const rejected=new SplatTasks(Object.assign({},config,{storeDir:rejectedDir}),deps);
+    try {
+        rejectBody='JOBS_ARCHIVE_DIR_INVALID: cannot evaluate HOST_EVAL($SCRATCH) on system cloud.data eyJabc.def.ghi '+'x'.repeat(500);
+        const refused=await call(rejected,'POST','/splat/task/new',newRun());
+        assert.strictEqual(refused.status,202);assert.strictEqual(refused.body.state,'failed');
+        const detail=refused.body.error.message;
+        assert(/HTTP 400/.test(detail)&&/JOBS_ARCHIVE_DIR_INVALID/.test(detail)&&/HOST_EVAL/.test(detail),detail);
+        assert(!/eyJabc/.test(detail)&&detail.length<=400,'token removed and bounded');
+        // No explanation from Tapis: still a clear generic message
+        rejectBody=null;failSubmit=false;
+    } finally {rejectBody=null;rejected.close();}
 
     // Worker URL shape only (same trust model as NodeODX); no allowlist
     assert.strictEqual(parseWorkerUrl('http://c301-001.ls6.tacc.utexas.edu:3101/').port,'3101');
