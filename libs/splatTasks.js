@@ -290,6 +290,14 @@ class SplatTasks {
                 const result=await this.serialize(r.uuid,()=>this.cancel(r,token));
                 reply(res,result.cancel_pending?202:200,this.view(result)); return true;
             }
+            // Look a run up by its WebODM run id (owner only). WebODM uses this to recover or cancel a run whose
+            // submission outcome it never learned, without re-submitting it.
+            const byRun=/^\/splat\/run\/([^/]+)$/.exec(url.pathname);
+            if(byRun && req.method==='GET') {
+                const found=UUID.test(byRun[1]) ? this.store.all().find(x=>x.run_id===byRun[1]) : null;
+                if(!found) fail(404,'not_found','Training attempt was not found.');
+                reply(res,200,this.view(this.owned(found.uuid,owner))); return true;
+            }
             const route=/^\/splat\/task\/([^/]+)\/(info|sync|output|download\/(model\.ply|manifest\.json|console\.txt))$/.exec(url.pathname);
             if(!route) fail(404,'not_found','Training endpoint was not found.');
             const r=this.owned(route[1],owner);
