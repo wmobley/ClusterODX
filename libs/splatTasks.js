@@ -80,6 +80,10 @@ class SplatTasks {
             const required=['baseUrl','tenantId','appId','appVersion','executionSystemId','archiveSystemId','queue','allocation','coresPerNode','memoryMB','maxMinutes','inputRoot','outputRoot','callbackUrl','workerBindHost','workerPort'];
             if(!this.config.instanceId || required.some(key=>!this.profile[key]) || this.profile.maxMinutes*60+600>this.config.workerLeaseSeconds) throw new Error('Incomplete NodeSplat fixed profile');
             if(this.profile.nodeBin!==undefined && !/^\/[^\s\0]+$/.test(String(this.profile.nodeBin))) throw new Error('Invalid NodeSplat nodeBin: use an absolute path without spaces');
+            const pr=this.profile;
+            if(pr.image!==undefined && !/^docker:\/\/[A-Za-z0-9._\/@:+-]{1,255}$/.test(String(pr.image))) throw new Error('Invalid NodeSplat image: use a docker:// reference');
+            if(pr.sifCacheDir!==undefined && !/^\/[^\s\0]+$/.test(String(pr.sifCacheDir))) throw new Error('Invalid NodeSplat sifCacheDir: use an absolute path without spaces');
+            if(pr.runMode!==undefined && !['container','host'].includes(pr.runMode)) throw new Error('Invalid NodeSplat runMode: container or host');
             const base=new URL(this.profile.baseUrl);
             if(base.protocol!=='https:' || base.username || base.password || base.search || base.hash) throw new Error('Unsafe NodeSplat Tapis base URL');
             this.store=dependencies.store || new SplatTaskStore(this.config.storeDir);
@@ -123,6 +127,10 @@ class SplatTasks {
         const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
         // Optional absolute path to a Node.js >= 22 binary on the shared filesystem (LS6 has none on PATH).
         if(p.nodeBin) env.NODESPLAT_NODE_BIN=p.nodeBin;
+        // Optional runtime selection for the worker entry script (see opensplat-ls6 nodesplat_entry.sh).
+        if(p.image) env.NODESPLAT_IMAGE=p.image;
+        if(p.sifCacheDir) env.NODESPLAT_SIF_CACHE_DIR=p.sifCacheDir;
+        if(p.runMode) env.NODESPLAT_RUN_MODE=p.runMode;
         return {name:r.job_name,appId:p.appId,appVersion:p.appVersion,execSystemId:p.executionSystemId,execSystemLogicalQueue:p.queue,archiveSystemId:p.archiveSystemId,nodeCount:1,coresPerNode:p.coresPerNode,memoryMB:p.memoryMB,maxMinutes:p.maxMinutes,archiveOnAppError:true,parameterSet:{appArgs:p.appArgs||[],envVariables:Object.keys(env).map(key=>({key,value:env[key]})),schedulerOptions:[{name:'TACC Allocation',arg:`-A ${p.allocation}`}]}};
     }
     async create(body,owner,token) {
