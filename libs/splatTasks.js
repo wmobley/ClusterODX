@@ -79,6 +79,7 @@ class SplatTasks {
             this.profile=Object.assign({},this.profile,resolveRoots(this.profile,dependencies.sharedPathMappings));
             const required=['baseUrl','tenantId','appId','appVersion','executionSystemId','archiveSystemId','queue','allocation','coresPerNode','memoryMB','maxMinutes','inputRoot','outputRoot','callbackUrl','workerBindHost','workerPort'];
             if(!this.config.instanceId || required.some(key=>!this.profile[key]) || this.profile.maxMinutes*60+600>this.config.workerLeaseSeconds) throw new Error('Incomplete NodeSplat fixed profile');
+            if(this.profile.nodeBin!==undefined && !/^\/[^\s\0]+$/.test(String(this.profile.nodeBin))) throw new Error('Invalid NodeSplat nodeBin: use an absolute path without spaces');
             const base=new URL(this.profile.baseUrl);
             if(base.protocol!=='https:' || base.username || base.password || base.search || base.hash) throw new Error('Unsafe NodeSplat Tapis base URL');
             this.store=dependencies.store || new SplatTaskStore(this.config.storeDir);
@@ -120,6 +121,8 @@ class SplatTasks {
     buildJob(r,api) {
         const p=this.profile;
         const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
+        // Optional absolute path to a Node.js >= 22 binary on the shared filesystem (LS6 has none on PATH).
+        if(p.nodeBin) env.NODESPLAT_NODE_BIN=p.nodeBin;
         return {name:r.job_name,appId:p.appId,appVersion:p.appVersion,execSystemId:p.executionSystemId,execSystemLogicalQueue:p.queue,archiveSystemId:p.archiveSystemId,nodeCount:1,coresPerNode:p.coresPerNode,memoryMB:p.memoryMB,maxMinutes:p.maxMinutes,archiveOnAppError:true,parameterSet:{appArgs:p.appArgs||[],envVariables:Object.keys(env).map(key=>({key,value:env[key]})),schedulerOptions:[{name:'TACC Allocation',arg:`-A ${p.allocation}`}]}};
     }
     async create(body,owner,token) {
