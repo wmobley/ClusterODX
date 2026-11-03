@@ -7,6 +7,7 @@ const axios = require('axios');
 const {SplatTaskStore,UUID} = require('./splatTaskStore');
 const {SplatError,fail,canonical,hash,same,validateRequest,verifyGrant} = require('./splatAuth');
 const {workerRequest} = require('./splatNetwork');
+const {cancelTapisJob,isTerminalOutcome} = require('./tapisCancel');
 
 const defaults = {
     enabled:false, profileId:'nodesplat-v1', instanceId:'', storeDir:'data/splat-tasks',
@@ -294,8 +295,10 @@ class SplatTasks {
             try { await this.requestWorker(r.worker_url,'/task/cancel',api,'POST',{uuid:r.uuid}); } catch(_) { /* Scheduler stop remains authoritative. */ }
         }
         if(r.tapis_job_uuid) {
-            try { await this.api(token).put(`/v3/jobs/${encodeURIComponent(r.tapis_job_uuid)}`,{operation:'stop'}); }
-            catch(error) { if(error.response && error.response.status===401) fail(401,'signin_required','Cancellation is pending; please sign in again.'); }
+            const cancelled=await cancelTapisJob(this.api(token),r.tapis_job_uuid);
+            if(cancelled.outcome==='unauthorized' && cancelled.status===401) fail(401,'signin_required','Cancellation is pending; please sign in again.');
+            // Lazy: config.js requires this module for defaults, and the logger requires config.
+            if(!isTerminalOutcome(cancelled)) require('./logger').warn(`[NODESPLAT] Tapis job cancel ${cancelled.outcome} for ${r.tapis_job_uuid}: ${cancelled.message||cancelled.status||''}`);
         }
     }
     async cancel(r,token) {

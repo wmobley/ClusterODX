@@ -86,6 +86,12 @@ module.exports = class AbstractASRProvider{
         return -1;
     }
 
+    // Providers with their own job registry override this; the generic
+    // asrProvider.vacuum handles docker-machine nodes only.
+    async vacuum(){
+        return { actions: [] };
+    }
+
     getNodesPendingCreation(){
         return this.nodesPendingCreation;
     }
