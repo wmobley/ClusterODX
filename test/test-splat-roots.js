@@ -39,6 +39,16 @@ const env = Object.fromEntries(service.buildJob({run_id: 'r', uuid: 'u', profile
 assert.strictEqual(env.NODESPLAT_INPUT_ROOT, '/corral/utexas/BCS26030/webodm/media/splats/staging');
 assert.strictEqual(env.NODESPLAT_OUTPUT_ROOT, '/corral/utexas/BCS26030/webodm/media/splats/output');
 service.close();
+// nodeBin is optional: absent by default, passed through when set, rejected when unsafe
+assert.strictEqual(env.NODESPLAT_NODE_BIN, undefined);
+const withNode = new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'c'), profile: Object.assign({}, profile, {nodeBin: '/corral/tools/node-v22/bin/node'})}, {sharedPathMappings: mappings});
+const nodeEnv = Object.fromEntries(withNode.buildJob({run_id: 'r', uuid: 'u', profile_id: 'p', lease_expires_at: Date.now() + 1000, job_name: 'j'}, 'tok')
+    .parameterSet.envVariables.map(e => [e.key, e.value]));
+assert.strictEqual(nodeEnv.NODESPLAT_NODE_BIN, '/corral/tools/node-v22/bin/node');
+withNode.close();
+for (const bad of ['node', 'relative/node', '/has space/node', '']) {
+    assert.throws(() => new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'd'), profile: Object.assign({}, profile, {nodeBin: bad})}, {sharedPathMappings: mappings}), /nodeBin/, bad);
+}
 assert.throws(() => new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'b'), profile}, {sharedPathMappings: {}}), /Incomplete/);
 
 console.log('NodeSplat shared-root derivation tests passed');
