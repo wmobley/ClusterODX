@@ -260,14 +260,18 @@ callback arguments rather than assuming the default hostname targets this instan
 
 ## Handoff observability
 
-Tapis job submission has a 60-second HTTP request timeout. A successful response
-with a job UUID emits `[TAPIS] Job submission accepted` with the ClusterODX job
-name, Tapis job UUID, HTTP status, and elapsed milliseconds. Failed requests and
+Tapis job submission has a 120-second HTTP request timeout
+(`tapis.submitTimeoutMs`). A successful response with a job UUID emits
+`[TAPIS] Job submission accepted` with the ClusterODX job name, the submitting
+user, Tapis job UUID, HTTP status, and elapsed milliseconds. Failed requests and
 responses missing a job UUID emit `[TAPIS] submit job failed`, including the
 timeout and elapsed time. Acceptance means Tapis returned a UUID; worker
-registration happens later. A timeout leaves acceptance uncertain: check Tapis
-for the job name before resubmitting, since Tapis may still have created it.
-ClusterODX does not automatically retry this submission.
+registration happens later. A timeout or other ambiguous failure does not mean
+the job was not created: ClusterODX looks the job up by its unique name for
+`tapis.submitReconcileSeconds` (default 120) and, when found, continues as if
+the submission had been accepted, logging `[TAPIS] Job submission reconciled`.
+Only a definite 4xx rejection is reported as a failure without a lookup. See
+"Job lifecycle, cancellation and orphan cleanup" below.
 
 ClusterODX and NodeODX emit allowlisted JSON log messages for the worker handoff.
 They use the event name `odx_node_handoff` and phases including
@@ -321,6 +325,126 @@ for test_file in test/*.js; do node "$test_file" || exit 1; done
 
 The repository's `npm test` script runs the registered contract and regression tests. The
 loop above remains useful when running an individual test file that is not in the script.
+
+## Job lifecycle, cancellation and orphan cleanup
+
+Every line ClusterODX logs now starts with an ISO timestamp, and every `[TAPIS]`
+event names the Tapis user (`user: <username>@<tenant>`) whose token was used.
+Tokens themselves are never logged.
+
+### Cancellation
+
+Jobs are cancelled with the documented Tapis call `POST /v3/jobs/{uuid}/cancel`
+(`libs/tapisCancel.js`). Each attempt logs `[TAPIS] job cancel <outcome>`:
+
+- `cancelled` — Tapis accepted the request.
+- `not_found` — cancel and a follow-up `GET /v3/jobs/{uuid}` both returned 404;
+  the job is treated as gone.
+- `unauthorized` — Tapis rejected the token (401/403). Never treated as success.
+- `failed` — any other error (5xx, timeout). The job is kept for a retry.
+
+A WebODM `/task/cancel` first removes the pending task so it can never be handed
+to a late worker, then cancels the Tapis job. A failed cancel is parked and
+retried by the vacuum while the user's token is still valid in memory.
+
+### Job registry
+
+`data/tapis-jobs.json` records every job ClusterODX asked Tapis for, written
+before the submit request (write-ahead) and updated on acceptance, registration,
+cancellation and completion. The file holds metadata only: job name, Tapis UUID,
+owner and tenant, task id, queue, timestamps and state. **No bearer token is ever
+stored**; any key matching token/secret/credential is stripped before writing.
+Writes are atomic (temporary file with mode `0600`, then rename). A corrupt file
+is reported and treated as empty.
+
+States: `submitting` → `submitted` → `registered` → `done`, with `cancelRequested`,
+`cancelFailed` and `unreachable` on the side. `unreachable` means ClusterODX has no
+usable token for the job (restart, or the token expired) and an operator must
+cancel it; it is logged once at `error` level as
+`[TAPIS] orphan requires operator action` with job name, UUID, owner and queue.
+
+After a restart, `submitted` and `registered` records are restored into memory
+without tokens. A restored pending task can still be handed to its worker: the
+worker's own validated bearer belongs to the same owner and is adopted for the
+route and for later cancellation.
+
+### Vacuum
+
+`TapisAsrProvider.vacuum()` runs every `tapis.vacuumIntervalSeconds` (default
+120) and from the generic ASR vacuum. For each open record, while a token is in
+memory:
+
+- `submitted` and Tapis reports a pre-run status (PENDING … QUEUED, BLOCKED):
+  wait up to `tapis.maxQueueWaitMinutes[queue]` (defaults `vm-small` 240,
+  `normal` 720, other 480), then cancel.
+- `submitted` and RUNNING but no worker registered within
+  `tapis.registrationGraceMinutes` (default 20) of the first RUNNING observation:
+  cancel.
+- `registered`, node online, no route, `taskQueueCount` 0 and no transient upload
+  for longer than `maxUploadTime` (default 3600 s) across
+  `tapis.consecutiveIdleTicks` (default 3) ticks: remove the node and cancel.
+- `registered`, node offline for longer than `maxUploadTime` across the same
+  number of ticks, or node missing from the registry: remove and cancel.
+- `cancelRequested`/`cancelFailed`: retry the cancel.
+- Tapis reports FINISHED/CANCELLED/FAILED or 404: close the record and drop the
+  node.
+- No token in memory, or `bearerExpiresAt` passed: mark `unreachable` and emit the
+  operator line once.
+
+Closed records older than `tapis.registryRetentionDays` (default 7) are pruned.
+With `tapis.vacuumDryRun: true` the sweep logs `[TAPIS] vacuum would …` and
+changes nothing; use it for the first week after deploying.
+
+### Unknown-job registration
+
+A task-bound registration (`role` other than `worker`) that authenticates with a
+valid JWT and names a `tapisJobUuid` ClusterODX has no record of is answered 404
+by default. With `worker.cancelUnknownJobs: true`, ClusterODX first fetches the
+job with the worker's own bearer and cancels it only if all of these hold: the
+job owner and tenant equal the token's, the job name starts with `clusterodx-`
+(and carries `tapis.instanceId` when configured), the app id and version match
+this configuration, and the job is not terminal. It then answers
+`410 {"error":"No task for this job","terminate":true}` whatever the cancel
+outcome. Foreign jobs, invalid tokens and `role: worker` registrations are
+unaffected (404/401 as before). At most 10 such cancels per owner per minute;
+repeat registrations for the same job within five minutes get 410 without a
+second cancel. Tapis enforces job ownership on cancel; these checks are defence
+in depth and the guard against two ClusterODX deployments sharing one app.
+
+The NodeODX launcher currently retries registration indefinitely and continues
+when registration fails; a companion change must make it exit on 410 and bound
+its retries. Until then, cancelling the job from ClusterODX is what stops the
+worker.
+
+### Configuration keys
+
+All under the private Tapis ASR configuration file.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tapis.submitTimeoutMs` | `120000` | HTTP timeout for `POST /v3/jobs/submit` |
+| `tapis.submitReconcileSeconds` | `120` | How long to look a timed-out submission up by name |
+| `tapis.reconcilePollMs` | `10000` | First poll interval (grows 1.5× to 30 s) |
+| `tapis.maxReconcileConcurrency` | `5` | Concurrent name lookups allowed |
+| `tapis.registryPath` | `data/tapis-jobs.json` | Job registry file |
+| `tapis.vacuumIntervalSeconds` | `120` | Sweep interval; `0` disables the timer |
+| `tapis.vacuumDryRun` | `false` | Log intended actions only |
+| `tapis.maxQueueWaitMinutes` | `{vm-small:240, normal:720, default:480}` | Pre-run wait before a queued job is cancelled |
+| `tapis.registrationGraceMinutes` | `20` | RUNNING without registration before cancel |
+| `tapis.consecutiveIdleTicks` | `3` | Idle/offline observations before a worker is removed |
+| `tapis.registryRetentionDays` | `7` | Keep closed records this long |
+| `tapis.maxUnauthorizedCancelRetries` | `3` | 401/403 cancel outcomes before a job is marked `unreachable` |
+| `tapis.instanceId` | unset | Tag in job names (`clusterodx-<n>-<id>-…`) |
+| `maxUploadTime` | `3600` | Seconds a registered worker may sit idle (now live for Tapis) |
+| `worker.cancelUnknownJobs` | `false` | Cancel verified unknown jobs at registration |
+
+### Operator procedure for `unreachable` orphans
+
+Search the log for `orphan requires operator action`. Each line gives the Slurm
+job name (`clusterodx-…`), Tapis UUID, owner and queue. Cancel it as the owner
+with `scancel` on the login node, or with the owner's token:
+`POST https://portals.tapis.io/v3/jobs/<uuid>/cancel`. ClusterODX cannot do this
+itself because it keeps no tokens on disk.
 
 ## Split-merge coordinator behind nginx
 
