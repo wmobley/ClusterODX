@@ -2,6 +2,7 @@ import { html, render } from "./lib/preact.html.mjs";
 import { useState, useEffect, useCallback, useRef } from "./lib/hooks.module.js";
 import { TaskList } from "./component/taskList.mjs";
 import { NodeList } from "./component/nodeList.mjs";
+import { SplatList } from "./component/splatList.mjs";
 import { Header } from "./component/header.mjs";
 import { RefreshButton } from "./component/refreshButton.mjs";
 import { AddInstanceButton } from "./component/addInstanceButton.mjs";
@@ -96,6 +97,7 @@ export default function App() {
   const [info, setInfo] = useState({ name: "", version: "" });
   const [nodes, setNodes] = useState([]);
   const [tasks, setTasks] = useState([]);
+  const [splats, setSplats] = useState([]);
   const [taskLoading, setTaskLoading] = useState(false);
   const [taskError, setTaskError] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
@@ -118,6 +120,12 @@ export default function App() {
         if (!Array.isArray(rows)) throw new Error("Invalid task list");
         return rows;
       }),
+      getFetch("/r/splat/list").then(async (response) => {
+        if (!response.ok) throw new Error("Unable to load NodeSplat workers");
+        const rows = await response.json();
+        if (!Array.isArray(rows)) throw new Error("Invalid NodeSplat list");
+        return rows;
+      }),
     ]);
     if (!isCurrent()) return;
     if (results[0].status === "fulfilled") setInfo(results[0].value);
@@ -128,6 +136,7 @@ export default function App() {
     } else {
       setTaskError("Unable to load tasks. Try refreshing; displayed tasks may be outdated.");
     }
+    if (results[3].status === "fulfilled") setSplats(results[3].value);
     setTaskLoading(false);
   }, []);
 
@@ -139,6 +148,7 @@ export default function App() {
     setInfo({ name: "", version: "" });
     setNodes([]);
     setTasks([]);
+    setSplats([]);
     setTaskLoading(false);
     setTaskError("");
   }, []);
@@ -184,10 +194,12 @@ export default function App() {
     <div class="dashboard-summary mb-4" aria-label="Cluster overview">
       <div><span class="text-muted">Registered nodes</span><strong>${nodes.length}</strong></div>
       <div><span class="text-muted">Online nodes</span><strong>${nodes.filter(node => node.isOnline).length}</strong></div>
+      <div><span class="text-muted">NodeSplat workers</span><strong>${splats.filter(worker => worker.registered).length}</strong></div>
       <div><span class="text-muted">Tracked tasks</span><strong>${tasks.length}</strong></div>
       <div><span class="text-muted">Assigned to workers</span><strong>${tasks.filter(task => task.state === "assigned").length}</strong></div>
     </div>
     <${NodeList} nodes=${nodes} getData=${loadDashboard} />
+    <${SplatList} workers=${splats} />
     <div id="btn-area">
       <${AddInstanceButton} getNodes=${loadDashboard} />
       <div style="flex-grow:1"></div>

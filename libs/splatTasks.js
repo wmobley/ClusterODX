@@ -195,6 +195,22 @@ class SplatTasks {
             return {success:true,uuid:r.uuid};
         });
     }
+    // Read-only admin view of NodeSplat workers. Never returns the worker token, grant or API hashes, or settings.
+    adminList() {
+        const registered=r=>Boolean(r.worker_url) && this.sessions.has(r.uuid);
+        return this.store.all().map(r=>({
+            uuid:r.uuid,
+            runId:r.run_id,
+            owner:r.owner && r.owner.username || null,
+            state:r.state,
+            phase:r.phase||null,
+            tapisJobUuid:r.tapis_job_uuid||null,
+            worker:r.worker_url?r.worker_url.replace(/^http:\/\//,'').replace(/\/$/,''):null,
+            registered:registered(r),
+            lastHeartbeat:r.last_heartbeat||null,
+            updatedAt:r.updated_at||null
+        })).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    }
     async verifyArtifacts(r) {
         const manifest=regularFile(this.profile.outputRoot,r.run_id,'manifest.json',1024*1024);
         const ply=regularFile(this.profile.outputRoot,r.run_id,'model.ply',this.config.maxResultBytes);
