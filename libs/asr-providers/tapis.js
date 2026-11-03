@@ -182,6 +182,16 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
 
     canHandle(imagesCount) { return this.getJobPropertiesFor(imagesCount) !== null; }
 
+    // The imageSizeMapping tier whose logicalQueue is `queue`, if any. Used so that a
+    // caller who overrides tapis-queue gets a job shaped for that queue (cores/memory)
+    // instead of the shape of the image-count tier, which may not fit the queue at all
+    // (e.g. a 64-core request sent to the 16-core vm-small queue).
+    getJobShapeForQueue(queue) {
+        if (!queue) return null;
+        return (this.getConfig('imageSizeMapping', []) || [])
+            .find(mapping => mapping && String(mapping.logicalQueue || '') === String(queue)) || null;
+    }
+
     getDefaultQueue(imagesCount = null) {
         const mapping = imagesCount === null ? null : this.getJobPropertiesFor(imagesCount);
         return (mapping && mapping.logicalQueue) || this.getConfig('system.logicalQueue', 'vm-small');
@@ -542,6 +552,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         const queue = tapisTaskOptions.getTaskOption(taskOptions, 'tapis-queue') || this.getDefaultQueue(imagesCount);
         const allocation = tapisTaskOptions.getTaskOption(taskOptions, 'tapis-allocation') || this.getConfig('scheduler.defaultAllocation', '');
         const maxMinutes = parseMinutes(tapisTaskOptions.getTaskOption(taskOptions, 'tapis-max-run-time') || mapping.maxJobTime || this.getConfig('job.maxJobTime', '01:00:00'));
+        // Cores and memory follow the queue when it has its own tier; otherwise the image-count tier.
+        const shape = this.getJobShapeForQueue(queue) || mapping;
         const job = {
             name: String(jobId),
             appId: this.getConfig('app.appId'),
@@ -550,8 +562,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             execSystemLogicalQueue: queue,
             archiveSystemId: this.getConfig('system.archiveSystemId'),
             nodeCount: plan.nodesForJob,
-            coresPerNode: Number(mapping.coresPerNode || this.getConfig('job.coresPerNode', 1)),
-            memoryMB: Number(mapping.memoryMB || this.getConfig('job.memoryMB', 4096)),
+            coresPerNode: Number(shape.coresPerNode || mapping.coresPerNode || this.getConfig('job.coresPerNode', 1)),
+            memoryMB: Number(shape.memoryMB || mapping.memoryMB || this.getConfig('job.memoryMB', 4096)),
             maxMinutes,
             archiveOnAppError: this.getConfig('job.archiveOnAppError', true),
             parameterSet: {
@@ -568,6 +580,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             jobId: String(jobId),
             imagesCount,
             mappingMaxImages: mapping.maxImages || null,
+            shapeSource: shape === mapping ? 'imageCount' : 'queue',
             appId: job.appId,
             appVersion: job.appVersion,
             queue: job.execSystemLogicalQueue,
