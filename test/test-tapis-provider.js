@@ -13,7 +13,7 @@ const makeJwt = (username, tenant = 'tacc') => {
 
 (async () => {
     const provider = new TapisProvider({
-        tapis: { baseUrl: 'https://example.tapis.io', tenantId: 'tacc' },
+        tapis: { baseUrl: 'https://example.tapis.io', tenantId: 'tacc', submitReconcileSeconds: 0, registryPath: require('path').join(require('os').tmpdir(), `clusterodx-test-registry-${process.pid}.json`) },
         app: { appId: 'nodeodx-ls6', appVersion: '1.0.18' },
         system: { executionSystemId: 'ls6', archiveSystemId: 'ls6', logicalQueue: 'normal', queueFilter: ['normal', 'gpu-a100-small'] },
         scheduler: { defaultAllocation: 'PT2050-DataX' },
@@ -64,7 +64,7 @@ const makeJwt = (username, tenant = 'tacc') => {
     provider.createApiClient = () => ({
         post: async (_path, body, options) => {
             assert.strictEqual(_path, '/v3/jobs/submit');
-            assert.strictEqual(options.timeout, 60000);
+            assert.strictEqual(options.timeout, 120000);
             payload = body;
             return { status: 201, data: { result: { uuid: 'tapis-job-1' } } };
         }
@@ -166,7 +166,7 @@ const makeJwt = (username, tenant = 'tacc') => {
         });
         await assert.rejects(provider.submitJobWithoutData('test-token', 'timeout-task', 50), /timeout/);
         assert.match(warning, /"code":"ECONNABORTED"/);
-        assert.match(warning, /"timeoutMs":60000/);
+        assert.match(warning, /"timeoutMs":120000/);
         assert.match(warning, /"jobId":"timeout-task"/);
         assert.strictEqual(provider.findPendingTask('timeout-task'), null);
         provider.createApiClient = () => ({ post: async () => ({ status: 200, data: {} }) });

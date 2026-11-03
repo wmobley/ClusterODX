@@ -351,6 +351,19 @@ module.exports = {
             authMethod
           });
         }
+        // Nothing here knows this job. If its own owner is asking, verify it with
+        // Tapis and cancel it so the worker does not idle to its wall limit.
+        if (authMethod === 'tapis-jwt' && validatedIdentity && registration.role !== 'worker' &&
+            registration.tapisJobUuid && typeof provider.cancelUnknownJob === 'function') {
+          const result = await provider.cancelUnknownJob(effectiveTapisToken, validatedIdentity, registration.tapisJobUuid);
+          if (result && result.handled) {
+            logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+              outcome: "rejected",
+              error_class: "unknown_job_cancelled"
+            }));
+            return res.status(410).json({ error: "No task for this job", terminate: true });
+          }
+        }
         logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
           outcome: "rejected",
           error_class: "not_found"
@@ -389,6 +402,14 @@ module.exports = {
           error_class: "auth_error"
         }));
         return res.status(403).json({ error: "Pending task ownership is not configured" });
+      }
+
+      // A record restored from the job registry after a restart carries no token.
+      // The worker's own validated bearer belongs to the same owner (checked above),
+      // so adopt it for the route and for later cancellation.
+      if (!pending.token && authMethod === 'tapis-jwt' && effectiveTapisToken && pending.tapisJobOwner) {
+        pending.token = effectiveTapisToken;
+        if (typeof provider.adoptToken === 'function') provider.adoptToken(pending.tapisJobId, effectiveTapisToken);
       }
 
       let node = nodes.find(existing => existing.hostname() === registration.hostname && existing.port() === registration.port);
@@ -446,6 +467,7 @@ module.exports = {
         await routetable.add(pending.taskId, node, pending.token);
         await tasktable.delete(pending.taskId);
         provider.consumePendingTask(pending.taskId);
+        if (typeof provider.markRegistered === 'function') provider.markRegistered(pending.tapisJobId, node);
         if (pending.tmpPath) utils.rmdir(pending.tmpPath);
 
         logHandoffEvent(logger, "webhook_completed", {

@@ -5,10 +5,18 @@ const config = require('../../config');
 const AbstractASRProvider = require('../classes/AbstractASRProvider');
 const tapisTaskOptions = require('../tapisTaskOptions');
 const logger = require('../logger');
+const { extractUserFromToken, describeTokenUser } = require('../tapisIdentity');
+const { cancelTapisJob, isTerminalOutcome } = require('../tapisCancel');
+const TapisJobRegistry = require('../tapisJobRegistry');
+
+const { STATES } = TapisJobRegistry;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Submissions whose outcome is unknown (timeout, no response, 5xx) and are being
+// looked up by name. Capped so a request flood cannot fan out Tapis calls.
+let activeReconciles = 0;
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|credential|api.?key)/i;
 const MAX_LOG_VALUE_LENGTH = 2000;
-const SUBMISSION_TIMEOUT_MS = 60000;
 
 const sanitizeForLog = (value, depth = 0) => {
     if (value === null || value === undefined) return value;
@@ -63,6 +71,15 @@ const logTapisRequestFailure = (operation, error, details = {}) => {
     })}`);
 };
 
+// Statuses before the job's own process is running on a compute node. A job in
+// one of these is waiting on the scheduler, not orphaned.
+const PRE_RUN_STATUSES = new Set([
+    'PENDING', 'PROCESSING_INPUTS', 'STAGING_INPUTS', 'STAGING_JOB',
+    'SUBMITTING', 'SUBMITTING_JOB', 'QUEUED', 'BLOCKED', 'PAUSED'
+]);
+const TERMINAL_STATUSES = new Set(['FINISHED', 'CANCELLED', 'FAILED']);
+const DEFAULT_MAX_QUEUE_WAIT_MINUTES = { 'vm-small': 240, normal: 720, default: 480 };
+
 const ACTIVE_STATUSES = new Set([
     'PENDING', 'PROCESSING_INPUTS', 'STAGING_INPUTS', 'STAGING_JOB',
     'SUBMITTING', 'SUBMITTING_JOB', 'QUEUED', 'RUNNING', 'ARCHIVING',
@@ -81,27 +98,6 @@ const parseMinutes = (value, fallback = 60) => {
 const mappingDefault = (mapping, key, fallback) => {
     const value = mapping && mapping[key];
     return value === undefined || value === null || value === '' ? fallback : value;
-};
-
-const extractUserFromToken = token => {
-    if (!token || typeof token !== 'string') return null;
-
-    try {
-        const parts = token.split('.');
-        if (parts.length !== 3) return null;
-        const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-        const username = claims['tapis/username'];
-        const tenantId = claims['tapis/tenant_id'];
-        if (!username || !tenantId) return null;
-
-        return {
-            username: String(username),
-            tenantId: String(tenantId),
-            fullUser: `${username}@${tenantId}`
-        };
-    } catch (_error) {
-        return null;
-    }
 };
 
 const sameUser = (pending, identity) => {
@@ -164,7 +160,80 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         const mappings = this.getConfig('imageSizeMapping', []);
         if (!Array.isArray(mappings)) throw new Error('Invalid config key imageSizeMapping (array expected)');
         mappings.sort((a, b) => Number(a.maxImages || 0) - Number(b.maxImages || 0));
+
+        const registryPath = this.getConfig('tapis.registryPath', 'data/tapis-jobs.json');
+        this.registry = new TapisJobRegistry(registryPath || 'data/tapis-jobs.json').load();
+        this.rehydrateFromRegistry();
+
+        const intervalSeconds = Number(this.getConfig('tapis.vacuumIntervalSeconds', 120));
+        if (intervalSeconds > 0 && !this.vacuumTimer) {
+            this.vacuumTimer = setInterval(() => {
+                this.vacuum().catch(error => logger.warn(`[TAPIS] vacuum failed: ${error.message}`));
+            }, intervalSeconds * 1000);
+            if (typeof this.vacuumTimer.unref === 'function') this.vacuumTimer.unref();
+        }
+        this.unknownJobCancels = { byOwner: new Map(), byJob: new Map() };
     }
+
+    // Optional instance tag in the job name so two ClusterODX deployments sharing
+    // one Tapis app can tell their jobs apart.
+    generateHostname(imagesCount) {
+        const base = super.generateHostname(imagesCount);
+        const instanceId = String(this.getConfig('tapis.instanceId', '') || '').replace(/[^A-Za-z0-9]/g, '');
+        if (!instanceId) return base;
+        const parts = base.split('-');
+        return [parts[0], parts[1], instanceId, ...parts.slice(2)].join('-');
+    }
+
+    jobNameBelongsHere(name) {
+        if (typeof name !== 'string' || !name.startsWith('clusterodx-')) return false;
+        const instanceId = String(this.getConfig('tapis.instanceId', '') || '').replace(/[^A-Za-z0-9]/g, '');
+        return !instanceId || name.split('-')[2] === instanceId;
+    }
+
+    // Restore in-memory job state from the registry after a restart. Tokens are
+    // never persisted, so restored records can be matched and handed off (the
+    // worker brings its own bearer) but not cancelled until a token arrives.
+    rehydrateFromRegistry() {
+        let restored = 0;
+        for (const record of this.registry.open()) {
+            if (!record.tapisJobId) continue; // never accepted; nothing to restore
+            const base = {
+                tapisJobId: record.tapisJobId,
+                jobId: record.jobName,
+                taskId: record.taskId || record.jobName,
+                tapisJobOwner: record.owner || null,
+                tapisJobOwnerTenant: record.ownerTenant || null,
+                rehydrated: true
+            };
+            if (record.state === STATES.SUBMITTED) {
+                const pending = Object.assign(base, {
+                    imagesCount: record.imagesCount,
+                    taskOptions: Array.isArray(record.taskOptions) ? record.taskOptions : [],
+                    fileNames: Array.isArray(record.fileNames) ? record.fileNames : [],
+                    tmpPath: record.tmpPath || null,
+                    pathImport: record.pathImport || null,
+                    submissionParams: record.submissionParams || {},
+                    token: null,
+                    nodeUser: record.owner && record.ownerTenant ? `${record.owner}@${record.ownerTenant}` : null,
+                    submittedJobs: [{ tapisJobId: record.tapisJobId, jobName: record.jobName }]
+                });
+                this.pendingTasks.set(pending.jobId, pending);
+                this.pendingTasks.set(pending.tapisJobId, pending);
+                this.pendingTasks.set(pending.taskId, pending);
+            }
+            this.activeJobs.set(record.tapisJobId, Object.assign(base, {
+                imagesCount: record.imagesCount,
+                status: record.state === STATES.CANCEL_FAILED || record.state === STATES.CANCEL_REQUESTED ? 'cancelFailed' : 'SUBMITTING',
+                token: null
+            }));
+            restored++;
+        }
+        if (restored) logger.info(`[TAPIS] restored ${restored} job record(s) from ${this.registry.filePath}; tokens must be re-presented before they can be cancelled`);
+        return restored;
+    }
+
+    getSubmitTimeoutMs() { return Number(this.getConfig('tapis.submitTimeoutMs', 120000)) || 120000; }
 
     getDriverName() { return 'tapis'; }
     getCreateRetries() { return Number(this.getConfig('createRetries', 3)) || 3; }
@@ -510,7 +579,9 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         if (!token || typeof token !== 'string') throw new Error('Tapis token is required');
         return axios.create({
             baseURL: this.getConfig('tapis.baseUrl'),
-            headers: { 'X-Tapis-Token': token }
+            headers: { 'X-Tapis-Token': token },
+            timeout: 30000, // per-call options override this (submit uses tapis.submitTimeoutMs)
+            maxRedirects: 0 // never follow a redirect carrying the token to another host
         });
     }
 
@@ -532,9 +603,378 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return typeof result === 'string' ? result : (result && result.status) || 'UNKNOWN';
     }
 
+    // Resolves to the classified outcome from libs/tapisCancel.js; never throws on
+    // a Tapis error so callers can park the job for a retry instead of losing it.
+    async getJob(token, tapisJobId) {
+        const response = await this.createApiClient(token).get(`/v3/jobs/${encodeURIComponent(tapisJobId)}`, { timeout: 30000 });
+        return (response && response.data && response.data.result) || null;
+    }
+
+    tokenFor(tapisJobId) {
+        const active = this.activeJobs.get(tapisJobId);
+        if (active && active.token) return active.token;
+        const pending = this.findPendingTask(tapisJobId);
+        return pending && pending.token ? pending.token : null;
+    }
+
+    maxQueueWaitMs(queue) {
+        const configured = Object.assign({}, DEFAULT_MAX_QUEUE_WAIT_MINUTES, this.getConfig('tapis.maxQueueWaitMinutes', {}) || {});
+        const minutes = Number(configured[queue] !== undefined ? configured[queue] : configured.default) || DEFAULT_MAX_QUEUE_WAIT_MINUTES.default;
+        return minutes * 60 * 1000;
+    }
+
+    // A worker registered for a job ClusterODX has no record of. Verify with Tapis
+    // that the job is this user's, belongs to this instance's app, and is still
+    // alive, then cancel it so it does not idle until its wall limit. Returns
+    // { handled: true } when a cancel was attempted (whatever its outcome) so the
+    // webhook can answer 410; { handled: false, reason } means fall through to 404.
+    async cancelUnknownJob(token, identity, tapisJobId) {
+        if (this.getConfig('worker.cancelUnknownJobs', false) !== true) return { handled: false, reason: 'disabled' };
+        if (!token || !identity || !tapisJobId) return { handled: false, reason: 'missing input' };
+
+        const known = this.registry && this.registry.get(tapisJobId);
+        if (known && (known.state === STATES.SUBMITTING || known.state === STATES.SUBMITTED)) {
+            return { handled: false, reason: 'job is being submitted or reconciled' };
+        }
+
+        const now = Date.now();
+        const limits = this.unknownJobCancels || (this.unknownJobCancels = { byOwner: new Map(), byJob: new Map() });
+        const lastForJob = limits.byJob.get(tapisJobId) || 0;
+        if (now - lastForJob < 5 * 60 * 1000) return { handled: true, reason: 'recently cancelled' };
+        const ownerKey = `${identity.username}@${identity.tenantId}`;
+        const recent = (limits.byOwner.get(ownerKey) || []).filter(t => now - t < 60 * 1000);
+        if (recent.length >= 10) {
+            logger.warn(`[TAPIS] unknown-job cancel rate limit hit for ${ownerKey}`);
+            return { handled: false, reason: 'rate limited' };
+        }
+
+        let job;
+        try {
+            job = await this.getJob(token, tapisJobId);
+        } catch (error) {
+            logTapisRequestFailure('verify unknown job', error, { tapisJobId, user: ownerKey });
+            return { handled: false, reason: 'lookup failed' };
+        }
+        if (!job) return { handled: false, reason: 'job not found' };
+        const ownerOk = String(job.owner || '') === identity.username && (!job.tenant || String(job.tenant) === identity.tenantId);
+        const appOk = job.appId === this.getConfig('app.appId') && (!job.appVersion || job.appVersion === this.getConfig('app.appVersion'));
+        const nameOk = this.jobNameBelongsHere(job.name);
+        const alive = !TERMINAL_STATUSES.has(String(job.status || '').toUpperCase());
+        if (!ownerOk || !appOk || !nameOk || !alive) {
+            logger.info(`[TAPIS] unknown job ${tapisJobId} not cancelled: ${JSON.stringify({ user: ownerKey, ownerOk, appOk, nameOk, alive, status: job.status })}`);
+            return { handled: false, reason: 'verification failed' };
+        }
+
+        recent.push(now);
+        limits.byOwner.set(ownerKey, recent);
+        limits.byJob.set(tapisJobId, now);
+        this.recordUpsert({
+            jobName: job.name, tapisJobId, owner: identity.username, ownerTenant: identity.tenantId,
+            queue: job.execSystemLogicalQueue, state: STATES.CANCEL_REQUESTED, cancelRequestedAt: now, reason: 'unknown registration'
+        });
+        const cancelled = await this.cancelJob(token, tapisJobId);
+        if (isTerminalOutcome(cancelled)) this.recordState(tapisJobId, STATES.DONE, { doneReason: 'unknown registration' });
+        else this.parkCancelFailed(tapisJobId, token, cancelled, { jobId: job.name });
+        return { handled: true, outcome: cancelled.outcome };
+    }
+
+    // Periodic sweep of the job registry and Tapis-backed nodes. Every action is
+    // logged with the user; with tapis.vacuumDryRun the sweep only logs.
+    async vacuum(deps = {}) {
+        if (!this.registry || this.vacuumRunning) return { skipped: true };
+        this.vacuumRunning = true;
+        const nodes = deps.nodes || require('../nodes');
+        const routetable = deps.routetable || require('../routetable');
+        const removeAndCleanupNode = deps.removeAndCleanupNode || (node => require('../netutils').removeAndCleanupNode(node, this));
+        const dryRun = this.getConfig('tapis.vacuumDryRun', false) === true;
+        const graceMs = (Number(this.getConfig('tapis.registrationGraceMinutes', 20)) || 20) * 60 * 1000;
+        const idleMs = (Number(this.getConfig('maxUploadTime', 3600)) || 3600) * 1000;
+        const idleTicks = Number(this.getConfig('tapis.consecutiveIdleTicks', 3)) || 3;
+        const retentionMs = (Number(this.getConfig('tapis.registryRetentionDays', 7)) || 7) * 24 * 3600 * 1000;
+        const now = Date.now();
+        const actions = [];
+
+        const act = async (record, action, run) => {
+            const line = JSON.stringify({ action, jobName: record.jobName, tapisJobId: record.tapisJobId || null,
+                user: record.owner ? `${record.owner}@${record.ownerTenant || ''}` : 'unknown', state: record.state, queue: record.queue || null });
+            actions.push({ action, jobName: record.jobName });
+            if (dryRun) { logger.info(`[TAPIS] vacuum would ${action}: ${line}`); return; }
+            logger.info(`[TAPIS] vacuum ${action}: ${line}`);
+            await run();
+        };
+        const cancelRecord = async (record, token, reason) => {
+            this.recordState(record.jobName, STATES.CANCEL_REQUESTED, { cancelRequestedAt: now, reason });
+            const cancelled = await this.cancelJob(token, record.tapisJobId);
+            if (isTerminalOutcome(cancelled)) {
+                this.activeJobs.delete(record.tapisJobId);
+                this.consumePendingTask(record.tapisJobId);
+                this.recordState(record.jobName, STATES.DONE, { doneReason: reason });
+            } else {
+                this.parkCancelFailed(record.tapisJobId, token, cancelled, { jobId: record.jobName });
+            }
+        };
+        const markUnreachable = (record, reason) => this.markUnreachable(record.jobName, reason, { dryRun });
+        const maxUnauthorized = Number(this.getConfig('tapis.maxUnauthorizedCancelRetries', 3)) || 3;
+
+        try {
+            for (const record of this.registry.open()) {
+                try {
+                    const token = record.tapisJobId ? this.tokenFor(record.tapisJobId) : null;
+                    const age = now - Number(record.submittedAt || record.createdAt || now);
+
+                    if (!record.tapisJobId) {
+                        // Submitted but never confirmed; Tapis may or may not have created it.
+                        if (age > this.maxQueueWaitMs(record.queue) + graceMs) {
+                            await act(record, 'close never-confirmed submission', async () =>
+                                this.recordState(record.jobName, STATES.DONE, { doneReason: 'never confirmed' }));
+                        }
+                        continue;
+                    }
+
+                    if (!token) {
+                        if (age > this.maxQueueWaitMs(record.queue) + graceMs) markUnreachable(record, 'no token in memory');
+                        continue;
+                    }
+
+                    if (record.bearerExpiresAt && record.bearerExpiresAt <= now) {
+                        markUnreachable(record, 'token expired');
+                        continue;
+                    }
+
+                    if (record.state === STATES.CANCEL_REQUESTED || record.state === STATES.CANCEL_FAILED) {
+                        if ((record.unauthorizedCount || 0) >= maxUnauthorized) {
+                            markUnreachable(record, 'Tapis rejected the token repeatedly');
+                            continue;
+                        }
+                        await act(record, 'retry cancel', () => cancelRecord(record, token, record.reason || 'cancel retry'));
+                        continue;
+                    }
+
+                    // A handoff in progress owns this record; let it finish.
+                    const claimed = this.findPendingTask(record.tapisJobId);
+                    if (claimed && claimed.registrationClaimed) continue;
+
+                    let job = null;
+                    try {
+                        job = await this.getJob(token, record.tapisJobId);
+                    } catch (error) {
+                        if (error.response && error.response.status === 404) {
+                            await act(record, 'close missing job', async () => this.recordState(record.jobName, STATES.DONE, { doneReason: 'not found in Tapis' }));
+                            continue;
+                        }
+                        logTapisRequestFailure('vacuum job lookup', error, { tapisJobId: record.tapisJobId, user: `${record.owner}@${record.ownerTenant || ''}` });
+                        continue;
+                    }
+                    // The lookup awaited; a registration may have moved the record on.
+                    const fresh = this.registry.get(record.jobName);
+                    if (!fresh || fresh.state !== record.state) continue;
+                    const tapisStatus = String((job && job.status) || '').toUpperCase();
+                    if (!tapisStatus) {
+                        logger.warn(`[TAPIS] vacuum: no status for job ${record.tapisJobId}; no decision this tick`);
+                        continue;
+                    }
+                    if (TERMINAL_STATUSES.has(tapisStatus)) {
+                        await act(record, `close ${tapisStatus.toLowerCase()} job`, async () => {
+                            this.activeJobs.delete(record.tapisJobId);
+                            this.consumePendingTask(record.tapisJobId);
+                            this.recordState(record.jobName, STATES.DONE, { doneReason: tapisStatus.toLowerCase(), tapisStatus });
+                            const node = nodes.find(n => n.getTapisJobId && n.getTapisJobId() === record.tapisJobId);
+                            if (node) { await routetable.removeByNode(node); nodes.remove(node); }
+                        });
+                        continue;
+                    }
+
+                    if (record.state === STATES.SUBMITTED) {
+                        if (PRE_RUN_STATUSES.has(tapisStatus)) {
+                            if (age > this.maxQueueWaitMs(record.queue)) {
+                                await act(record, 'cancel job queued too long', () => cancelRecord(record, token, 'queued too long'));
+                            }
+                            continue;
+                        }
+                        // RUNNING (or an unexpected status) without a registration.
+                        const runningSince = Number(record.runningSeenAt || (job && job.remoteStarted && Date.parse(job.remoteStarted)) || 0) || now;
+                        if (!record.runningSeenAt) this.recordUpsert({ jobName: record.jobName, runningSeenAt: runningSince, tapisStatus });
+                        if (now - runningSince > graceMs) {
+                            await act(record, 'cancel running job that never registered', () => cancelRecord(record, token, 'never registered'));
+                        }
+                        continue;
+                    }
+
+                    if (record.state === STATES.REGISTERED) {
+                        const node = nodes.find(n => n.getTapisJobId && n.getTapisJobId() === record.tapisJobId);
+                        if (!node) {
+                            await act(record, 'cancel job whose node is gone', () => cancelRecord(record, token, 'node removed'));
+                            continue;
+                        }
+                        if (node.isOnline()) {
+                            const routes = await routetable.findByNode(node);
+                            const busy = node.getInfoProperty('taskQueueCount', 0) > 0 || (routes && Object.keys(routes).length > 0) || node.transients > 0;
+                            if (busy) {
+                                if (record.idleTicks || record.offlineTicks) this.recordUpsert({ jobName: record.jobName, idleTicks: 0, idleSince: null, offlineTicks: 0 });
+                                continue;
+                            }
+                            const ticks = (record.idleTicks || 0) + 1;
+                            const idleSince = record.idleSince || now;
+                            this.recordUpsert({ jobName: record.jobName, idleTicks: ticks, idleSince, offlineTicks: 0 });
+                            if (ticks >= idleTicks && now - idleSince > idleMs) {
+                                await act(record, 'remove idle worker', () => removeAndCleanupNode(node));
+                            }
+                            continue;
+                        }
+                        const offlineTicks = (record.offlineTicks || 0) + 1;
+                        this.recordUpsert({ jobName: record.jobName, offlineTicks, idleTicks: 0 });
+                        if (offlineTicks >= idleTicks && now - node.getLastRefreshed() > idleMs) {
+                            await act(record, 'remove offline worker', () => removeAndCleanupNode(node));
+                        }
+                    }
+                } catch (error) {
+                    logger.warn(`[TAPIS] vacuum skipped ${record.jobName}: ${error.message}`);
+                }
+            }
+            const pruned = this.registry.prune(retentionMs);
+            if (pruned) logger.info(`[TAPIS] vacuum pruned ${pruned} closed job record(s)`);
+        } finally {
+            this.vacuumRunning = false;
+        }
+        return { actions, dryRun };
+    }
+
     async cancelJob(token, tapisJobId) {
-        await this.createApiClient(token).put(`/v3/jobs/${encodeURIComponent(tapisJobId)}`, { operation: 'stop' });
-        return true;
+        let result;
+        try {
+            result = await cancelTapisJob(this.createApiClient(token), tapisJobId);
+        } catch (error) {
+            result = { outcome: 'failed', tapisJobId, message: String(error.message || error).slice(0, 300) };
+        }
+        const line = `[TAPIS] job cancel ${result.outcome}: ${JSON.stringify({
+            tapisJobId,
+            user: describeTokenUser(token),
+            status: result.status,
+            elapsedMs: result.elapsedMs,
+            message: result.message
+        })}`;
+        if (isTerminalOutcome(result)) logger.info(line); else logger.warn(line);
+        return result;
+    }
+
+    // Keep a job whose cancel did not succeed so a later sweep can retry while
+    // the token is still valid. Tokens live only in memory.
+    parkCancelFailed(tapisJobId, token, outcome, extra = {}) {
+        this.activeJobs.set(tapisJobId, Object.assign(this.activeJobs.get(tapisJobId) || {}, extra, {
+            tapisJobId,
+            token,
+            status: 'cancelFailed',
+            cancelOutcome: outcome && outcome.outcome,
+            cancelRequestedAt: Date.now()
+        }));
+        const previous = this.registry && this.registry.get(tapisJobId);
+        this.recordState(tapisJobId, STATES.CANCEL_FAILED, {
+            cancelOutcome: outcome && outcome.outcome,
+            cancelRequestedAt: Date.now(),
+            unauthorizedCount: ((previous && previous.unauthorizedCount) || 0) + (outcome && outcome.outcome === 'unauthorized' ? 1 : 0)
+        });
+    }
+
+    // Registry helpers tolerate a provider used before initialize() in tests.
+    recordState(identifier, state, extra = {}) {
+        if (!this.registry) return null;
+        return this.registry.setState(identifier, state, extra);
+    }
+
+    recordUpsert(record) {
+        if (!this.registry) return null;
+        return this.registry.upsert(record);
+    }
+
+    // A restored record gets the worker's validated bearer so it can be cancelled later.
+    adoptToken(tapisJobId, token) {
+        const active = this.activeJobs.get(tapisJobId);
+        if (active && !active.token) active.token = token;
+        const pending = this.findPendingTask(tapisJobId);
+        if (pending && !pending.token) pending.token = token;
+        const identity = extractUserFromToken(token);
+        const record = this.registry && this.registry.get(tapisJobId);
+        if (record) {
+            this.recordUpsert({
+                jobName: record.jobName,
+                bearerExpiresAt: identity ? identity.expiresAt : null,
+                unauthorizedCount: 0,
+                state: record.state === STATES.UNREACHABLE ? STATES.SUBMITTED : record.state
+            });
+        }
+    }
+
+    // Single place that gives up on a job ClusterODX cannot cancel itself. Emits
+    // the operator line once, with everything needed to cancel it by hand.
+    markUnreachable(identifier, reason, { dryRun = false } = {}) {
+        const record = this.registry && this.registry.get(identifier);
+        if (!record || record.state === STATES.UNREACHABLE) return record || null;
+        logger.error(`[TAPIS] orphan requires operator action: ${JSON.stringify({
+            jobName: record.jobName,
+            tapisJobId: record.tapisJobId || null,
+            user: record.owner ? `${record.owner}@${record.ownerTenant || ''}` : 'unknown',
+            queue: record.queue || null,
+            reason
+        })}`);
+        if (dryRun) return record;
+        return this.recordState(record.jobName, STATES.UNREACHABLE, { reason, unreachableAt: Date.now() });
+    }
+
+    // Called by the registration webhook once the task has been handed to the worker.
+    markRegistered(tapisJobId, node) {
+        return this.recordState(tapisJobId, STATES.REGISTERED, {
+            registeredAt: Date.now(),
+            node: node && typeof node.hostname === 'function' ? { hostname: node.hostname(), port: node.port() } : null
+        });
+    }
+
+    // Look a submission up by its unique job name when Tapis did not answer in time.
+    // Returns the Tapis job object or null. Never throws.
+    async reconcileSubmission(token, jobName, startedAt, status = null) {
+        const seconds = Number(this.getConfig('tapis.submitReconcileSeconds', 120));
+        const cap = Number(this.getConfig('tapis.maxReconcileConcurrency', 5)) || 5;
+        const pollMs = Number(this.getConfig('tapis.reconcilePollMs', 10000)) || 10000;
+        if (!(seconds > 0)) return null;
+        if (activeReconciles >= cap) {
+            logger.warn(`[TAPIS] submission reconcile skipped for ${jobName}: ${activeReconciles} lookups already running`);
+            return null;
+        }
+        activeReconciles++;
+        const identity = extractUserFromToken(token);
+        const appId = this.getConfig('app.appId');
+        const appVersion = this.getConfig('app.appVersion');
+        const deadline = Date.now() + seconds * 1000;
+        let delay = pollMs;
+        try {
+            for (;;) {
+                try {
+                    const response = await this.createApiClient(token).get('/v3/jobs/search', {
+                        params: { search: `name.eq.${jobName}` },
+                        timeout: 30000
+                    });
+                    const jobs = ((response && response.data && response.data.result) || []).filter(job =>
+                        job && job.name === jobName &&
+                        (!job.appId || job.appId === appId) &&
+                        (!job.appVersion || job.appVersion === appVersion) &&
+                        (!identity || !job.owner || job.owner === identity.username) &&
+                        (!job.created || Date.parse(job.created) >= startedAt - 60000));
+                    if (jobs.length === 1 && jobs[0].uuid) return jobs[0];
+                    if (jobs.length > 1) {
+                        logger.warn(`[TAPIS] submission reconcile for ${jobName} found ${jobs.length} jobs; refusing to guess`);
+                        return null;
+                    }
+                } catch (error) {
+                    logTapisRequestFailure('reconcile submission', error, { jobName, user: describeTokenUser(token) });
+                }
+                // An abort while polling does not stop the lookup: the uuid is
+                // needed to cancel the job, and createNode cancels on return.
+                if (Date.now() >= deadline) return null;
+                await sleep(Math.max(1, Math.min(delay, deadline - Date.now())));
+                delay = Math.min(Math.round(delay * 1.5), 30000);
+            }
+        } finally {
+            activeReconciles--;
+        }
     }
 
     calculateNodeSubmissionPlan(imagesCount, taskOptions = []) {
@@ -552,7 +992,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         };
     }
 
-    async submitJobWithoutData(token, jobId, imagesCount, taskOptions = []) {
+    async submitJobWithoutData(token, jobId, imagesCount, taskOptions = [], status = null) {
         const plan = this.calculateNodeSubmissionPlan(imagesCount, taskOptions);
         const mapping = plan.jobProps || {};
         const queue = tapisTaskOptions.getTaskOption(taskOptions, 'tapis-queue') || this.getDefaultQueue(imagesCount);
@@ -580,8 +1020,10 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             subscriptions: []
         };
         const jobSummary = summarizeJob(job);
+        const identity = extractUserFromToken(token);
         logger.info(`[TAPIS] Submission plan resolved: ${JSON.stringify({
             jobId: String(jobId),
+            user: describeTokenUser(token),
             imagesCount,
             mappingMaxImages: mapping.maxImages || null,
             appId: job.appId,
@@ -594,33 +1036,79 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             appArgNames: jobSummary.appArgNames,
             envVariableKeys: jobSummary.envVariableKeys
         })}`);
-        let response;
+        const timeoutMs = this.getSubmitTimeoutMs();
         const startedAt = Date.now();
+        this.recordUpsert({
+            jobName: job.name,
+            state: STATES.SUBMITTING,
+            owner: identity ? identity.username : null,
+            ownerTenant: identity ? identity.tenantId : null,
+            bearerExpiresAt: identity ? identity.expiresAt : null,
+            imagesCount,
+            queue: job.execSystemLogicalQueue,
+            nodeCount: job.nodeCount,
+            maxMinutes: job.maxMinutes,
+            submittedAt: startedAt
+        });
+        let uuid = null;
+        let httpStatus = null;
+        let reconciled = false;
         try {
-            response = await this.createApiClient(token).post('/v3/jobs/submit', job, {
-                timeout: SUBMISSION_TIMEOUT_MS
-            });
-            const uuid = response && response.data && response.data.result && response.data.result.uuid;
+            const response = await this.createApiClient(token).post('/v3/jobs/submit', job, { timeout: timeoutMs });
+            httpStatus = response && response.status;
+            uuid = response && response.data && response.data.result && response.data.result.uuid;
             if (!uuid) throw new Error('Tapis response did not include a job UUID');
         } catch (error) {
+            const responseStatus = error.response && error.response.status;
             logTapisRequestFailure('submit job', error, {
                 baseUrl: this.getConfig('tapis.baseUrl'),
                 jobId: String(jobId),
-                status: response ? response.status : error.response && error.response.status,
-                timeoutMs: SUBMISSION_TIMEOUT_MS,
+                user: describeTokenUser(token),
+                status: httpStatus || responseStatus,
+                timeoutMs,
                 elapsedMs: Date.now() - startedAt,
                 job: summarizeJob(job)
             });
-            throw error;
+            // A definite 4xx means Tapis rejected the request and no job exists.
+            // Anything else (timeout, no response, 5xx, missing uuid) is ambiguous:
+            // Tapis may have created the job, so look it up by its unique name.
+            const definiteRejection = responseStatus && responseStatus >= 400 && responseStatus < 500;
+            if (!definiteRejection) {
+                const found = await this.reconcileSubmission(token, job.name, startedAt, status);
+                if (found) {
+                    uuid = found.uuid;
+                    reconciled = true;
+                    logger.info(`[TAPIS] Job submission reconciled: ${JSON.stringify({
+                        jobId: String(jobId),
+                        user: describeTokenUser(token),
+                        tapisJobId: uuid,
+                        tapisStatus: found.status,
+                        elapsedMs: Date.now() - startedAt
+                    })}`);
+                }
+            }
+            if (!uuid) {
+                this.recordUpsert({
+                    jobName: job.name,
+                    state: definiteRejection ? STATES.DONE : STATES.SUBMITTING,
+                    doneReason: definiteRejection ? 'rejected' : undefined,
+                    submitFailedAt: Date.now(),
+                    lastError: { status: responseStatus || null, code: error.code || null }
+                });
+                throw error;
+            }
         }
-        const uuid = response.data.result.uuid;
-        logger.info(`[TAPIS] Job submission accepted: ${JSON.stringify({
-            jobId: String(jobId),
-            tapisJobId: uuid,
-            status: response.status,
-            elapsedMs: Date.now() - startedAt
-        })}`);
+        if (!reconciled) {
+            logger.info(`[TAPIS] Job submission accepted: ${JSON.stringify({
+                jobId: String(jobId),
+                user: describeTokenUser(token),
+                tapisJobId: uuid,
+                status: httpStatus,
+                elapsedMs: Date.now() - startedAt
+            })}`);
+        }
         this.activeJobs.set(uuid, { jobId, imagesCount, status: 'SUBMITTING', token });
+        this.recordUpsert({ jobName: job.name, tapisJobId: uuid, state: STATES.SUBMITTED, acceptedAt: Date.now(), reconciled });
         return { primaryJobId: uuid, submittedJobs: [{ tapisJobId: uuid, jobName: job.name }] };
     }
 
@@ -630,10 +1118,30 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
 
         await this.validateToken(token);
         const identity = extractUserFromToken(token);
-        const submission = await this.submitJobWithoutData(token, hostname, imagesCount, taskOptions);
+        // Write-ahead: the task-level fields a restored record needs for handoff.
+        this.recordUpsert({
+            jobName: hostname,
+            taskId: clusterTaskId || hostname,
+            state: STATES.SUBMITTING,
+            owner: identity ? identity.username : null,
+            ownerTenant: identity ? identity.tenantId : null,
+            bearerExpiresAt: identity ? identity.expiresAt : null,
+            imagesCount,
+            taskOptions: tapisTaskOptions.stripTapisOptions(taskOptions),
+            fileNames,
+            tmpPath,
+            pathImport,
+            submissionParams
+        });
+        const submission = await this.submitJobWithoutData(token, hostname, imagesCount, taskOptions, status);
         if (status && status.aborted) {
-            await this.cancelJob(token, submission.primaryJobId);
-            this.activeJobs.delete(submission.primaryJobId);
+            const cancelled = await this.cancelJob(token, submission.primaryJobId);
+            if (isTerminalOutcome(cancelled)) {
+                this.activeJobs.delete(submission.primaryJobId);
+                this.recordState(submission.primaryJobId, STATES.DONE, { doneReason: 'aborted' });
+            } else {
+                this.parkCancelFailed(submission.primaryJobId, token, cancelled, { jobId: hostname, taskId: clusterTaskId || hostname });
+            }
             throw new Error('Aborted');
         }
         const pending = {
@@ -713,9 +1221,21 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     async cancelPendingTask(identifier) {
         const pending = this.findPendingTask(identifier);
         if (!pending) return false;
-        await this.cancelJob(pending.token, pending.tapisJobId);
+        // Consume first: once a cancel is requested the task must never be handed
+        // to a worker, even if Tapis refuses or times out below.
         this.consumePendingTask(identifier);
-        this.activeJobs.delete(pending.tapisJobId);
+        if (!pending.token) {
+            this.markUnreachable(pending.tapisJobId, 'cancel requested but no token in memory (submitted before a restart)');
+            return true;
+        }
+        this.recordState(pending.tapisJobId, STATES.CANCEL_REQUESTED, { cancelRequestedAt: Date.now() });
+        const cancelled = await this.cancelJob(pending.token, pending.tapisJobId);
+        if (isTerminalOutcome(cancelled)) {
+            this.activeJobs.delete(pending.tapisJobId);
+            this.recordState(pending.tapisJobId, STATES.DONE, { doneReason: 'cancelled' });
+        } else {
+            this.parkCancelFailed(pending.tapisJobId, pending.token, cancelled, { jobId: pending.jobId, taskId: pending.taskId });
+        }
         return true;
     }
 
@@ -728,11 +1248,19 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         const tapisJobId = node.getTapisJobId();
         const active = this.activeJobs.get(tapisJobId);
         if (!active || !active.token) {
+            logger.warn(`[TAPIS] cannot cancel job ${tapisJobId} for ${node}: no token in memory`);
+            this.markUnreachable(tapisJobId, 'node removed but no token in memory (submitted before a restart)');
             return false;
         }
-        await this.cancelJob(active.token, tapisJobId);
-        this.activeJobs.delete(tapisJobId);
-        return true;
+        this.recordState(tapisJobId, STATES.CANCEL_REQUESTED, { cancelRequestedAt: Date.now() });
+        const cancelled = await this.cancelJob(active.token, tapisJobId);
+        if (isTerminalOutcome(cancelled)) {
+            this.activeJobs.delete(tapisJobId);
+            this.recordState(tapisJobId, STATES.DONE, { doneReason: 'node removed' });
+            return true;
+        }
+        this.parkCancelFailed(tapisJobId, active.token, cancelled);
+        return false;
     }
 
     getActiveJobStatuses() { return new Set(ACTIVE_STATUSES); }
