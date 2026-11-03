@@ -39,14 +39,21 @@ try {
 logPath += path.sep;
 logPath += package_info.name + ".log";
 
+// Every line carries an ISO timestamp so Tapis-side events can be correlated
+// with Slurm, Tapis and WebODM logs. Message text is unchanged.
+const lineFormat = winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.printf(({ timestamp, level, message }) => `${timestamp} ${level}: ${message}`)
+);
+
 let transports = [];
 if (!config.deamon){
-    transports.push(new winston.transports.Console({ level: config.logger.level, format: winston.format.simple() }));
+    transports.push(new winston.transports.Console({ level: config.logger.level, format: lineFormat }));
 }
 
 let logger = winston.createLogger({ transports });
 logger.add(new winston.transports.File({
-        format: winston.format.simple(), 
+        format: lineFormat,
         filename: logPath, // Write to projectname.log
         json: false, // Write in plain text, not JSON
         maxsize: config.logger.maxFileSize, // Max size of each file

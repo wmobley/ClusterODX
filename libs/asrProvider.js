@@ -121,6 +121,12 @@ module.exports = {
     },
 
     vacuum: async function(){
+        // Providers that track jobs beyond docker-machine semantics (Tapis) sweep
+        // their own registry; the generic loop below only understands docker-machine.
+        if (asrProvider && typeof asrProvider.vacuum === 'function'){
+            asrProvider.vacuum().catch(e => logger.warn(`ASR provider vacuum failed: ${e.message}`));
+        }
+
         const autoNodes = nodes.filter(n => n.isAutoSpawned());
 
         // Automatically remove autospawned nodes if either:

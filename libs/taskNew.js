@@ -28,6 +28,7 @@ const nodes = require('./nodes');
 const odmOptions = require('./odmOptions');
 const statusCodes = require('./statusCodes');
 const asrProvider = require('./asrProvider');
+const { describeTokenUser } = require('./tapisIdentity');
 const logger = require('./logger');
 const events = require('events');
 const sharedSubmodel = require('./sharedSubmodel');
@@ -523,11 +524,11 @@ module.exports = {
                 }
                 if (dmHostname && autoscale){
                     const asr = asrProvider.get();
-                    try{
-                        asr.destroyMachine(dmHostname);
-                    }catch(e){
-                        logger.warn(`Could not destroy machine ${dmHostname}: ${e}`);
-                    }
+                    // destroyMachine is asynchronous; a failed cancellation must be a
+                    // warning here, never an unhandled rejection.
+                    Promise.resolve()
+                        .then(() => asr.destroyMachine(dmHostname))
+                        .catch(e => logger.warn(`Could not destroy machine ${dmHostname} (user ${describeTokenUser(token)}): ${e.message || e}`));
                 }
             };
 
@@ -538,7 +539,7 @@ module.exports = {
                     if (taskInfo){
                         taskInfo.status.code = statusCodes.FAILED;
                         await tasktable.add(uuid, { taskInfo, output: [err.message] }, token);
-                        logger.warn(`Cannot forward task ${uuid} to processing node ${node}: ${err.message}`);
+                        logger.warn(`Cannot forward task ${uuid} (user ${describeTokenUser(token)}) to processing node ${node}: ${err.message}`);
                     }
                 }
                 utils.rmdir(tmpPath);
