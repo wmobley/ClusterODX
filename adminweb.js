@@ -649,7 +649,7 @@ module.exports = {
       }
     };
 
-    app.use("/r/task/list", (_req, res, next) => {
+    app.use(["/r/task/list", "/r/splat/list"], (_req, res, next) => {
       res.set("Cache-Control", "no-store");
       next();
     });
@@ -709,6 +709,13 @@ module.exports = {
     app.get("/r/node/list", (req, res) => {
       const list = nodes.all();
       res.json(list.map((node) => nodeToJson(node)));
+    });
+
+    // NodeSplat workers are kept outside the NodeODX node registry, so they have their own list.
+    app.get("/r/splat/list", (_req, res) => {
+      res.set("Cache-Control", "no-store");
+      const splatTasks = require("./libs/splatInstance").instance;
+      res.json(splatTasks ? splatTasks.adminList() : []);
     });
 
     app.get("/r/task/list", async (_req, res) => {
