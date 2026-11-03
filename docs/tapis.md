@@ -116,6 +116,12 @@ defaults: `normal`, two nodes, and 360 minutes. Explicit task options remain
 overrides, so a caller that intentionally sends `tapis-node=1` or
 `tapis-max-run-time=480` will still get those values.
 
+`coresPerNode` and `memoryMB` follow the queue: when `tapis-queue` names the
+`logicalQueue` of an `imageSizeMapping` entry, that entry's cores and memory are
+used, so a small task sent to `normal` asks for a full node and a large task sent
+to `vm-small` asks for 16 cores rather than a shape the queue cannot provide. A
+queue that appears in no mapping entry keeps the image-count tier's shape.
+
 For the current LS6 deployment, update the private runtime `tapis-config.json`
 before restarting ClusterODX:
 

@@ -256,6 +256,50 @@ const makeJwt = (username, tenant = 'tacc') => {
     assert.strictEqual(provider.findRegistrationJob('tapis-job-2').tapisJobOwner, 'owner');
     assert.strictEqual(provider.findRegistrationJob('cluster-task-1'), null);
 
+    // Job shape follows the requested queue when that queue has its own imageSizeMapping tier.
+    const shapeProvider = new TapisProvider({
+        tapis: { baseUrl: 'https://example.tapis.io', tenantId: 'tacc', registryPath: require('path').join(require('os').tmpdir(), `clusterodx-test-shape-${process.pid}.json`) },
+        app: { appId: 'nodeodx-ls6', appVersion: '1.0.18' },
+        system: { executionSystemId: 'ls6', archiveSystemId: 'ls6', logicalQueue: 'vm-small', queueFilter: ['vm-small', 'normal', 'gpu-a100-small'] },
+        scheduler: { defaultAllocation: 'BCS26030' },
+        job: { maxJobTime: '01:00:00', nodeCount: 1, coresPerNode: 1, memoryMB: 4096, maxNodesPerJob: 4, appArgs: [], envVariables: [] },
+        imageSizeMapping: [
+            { maxImages: 200, nodeCount: 1, logicalQueue: 'vm-small', coresPerNode: 16, memoryMB: 30720, maxJobTime: '04:00:00' },
+            { maxImages: 1000, nodeCount: 2, logicalQueue: 'normal', coresPerNode: 64, memoryMB: 30720, maxJobTime: '06:00:00' }
+        ]
+    });
+    await shapeProvider.initialize();
+    let shapePayload = null;
+    shapeProvider.createApiClient = () => ({
+        post: async (_path, body) => {
+            shapePayload = body;
+            return { status: 201, data: { result: { uuid: 'tapis-job-shape' } } };
+        }
+    });
+    assert.strictEqual(shapeProvider.getJobShapeForQueue('normal').coresPerNode, 64);
+    assert.strictEqual(shapeProvider.getJobShapeForQueue('gpu-a100-small'), null);
+    assert.strictEqual(shapeProvider.getJobShapeForQueue(''), null);
+
+    // 468 images defaults to the normal tier...
+    await shapeProvider.submitJobWithoutData('test-token', 'shape-default', 468, []);
+    assert.strictEqual(shapePayload.execSystemLogicalQueue, 'normal');
+    assert.strictEqual(shapePayload.coresPerNode, 64);
+    assert.strictEqual(shapePayload.nodeCount, 2);
+    // ...but forced onto vm-small it must ask for a vm-small shape, not 64 cores.
+    await shapeProvider.submitJobWithoutData('test-token', 'shape-vm-small', 468, [{ name: 'tapis-queue', value: 'vm-small' }]);
+    assert.strictEqual(shapePayload.execSystemLogicalQueue, 'vm-small');
+    assert.strictEqual(shapePayload.coresPerNode, 16);
+    assert.strictEqual(shapePayload.memoryMB, 30720);
+    // A small task sent to normal gets the normal tier's shape.
+    await shapeProvider.submitJobWithoutData('test-token', 'shape-normal', 50, [{ name: 'tapis-queue', value: 'normal' }]);
+    assert.strictEqual(shapePayload.execSystemLogicalQueue, 'normal');
+    assert.strictEqual(shapePayload.coresPerNode, 64);
+    assert.strictEqual(shapePayload.nodeCount, 1);
+    // A queue with no tier of its own keeps the image-count tier's shape.
+    await shapeProvider.submitJobWithoutData('test-token', 'shape-gpu', 50, [{ name: 'tapis-queue', value: 'gpu-a100-small' }]);
+    assert.strictEqual(shapePayload.execSystemLogicalQueue, 'gpu-a100-small');
+    assert.strictEqual(shapePayload.coresPerNode, 16);
+
     console.log('TAPIS PROVIDER TEST PASSED');
 })().catch(error => {
     console.error(error.stack || error);
