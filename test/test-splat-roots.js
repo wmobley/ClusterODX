@@ -39,6 +39,29 @@ const env = Object.fromEntries(service.buildJob({run_id: 'r', uuid: 'u', profile
 assert.strictEqual(env.NODESPLAT_INPUT_ROOT, '/corral/utexas/BCS26030/webodm/media/splats/staging');
 assert.strictEqual(env.NODESPLAT_OUTPUT_ROOT, '/corral/utexas/BCS26030/webodm/media/splats/output');
 service.close();
+// nodeBin is optional: absent by default, passed through when set, rejected when unsafe
+assert.strictEqual(env.NODESPLAT_NODE_BIN, undefined);
+const withNode = new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'c'), profile: Object.assign({}, profile, {nodeBin: '/corral/tools/node-v22/bin/node'})}, {sharedPathMappings: mappings});
+const nodeEnv = Object.fromEntries(withNode.buildJob({run_id: 'r', uuid: 'u', profile_id: 'p', lease_expires_at: Date.now() + 1000, job_name: 'j'}, 'tok')
+    .parameterSet.envVariables.map(e => [e.key, e.value]));
+assert.strictEqual(nodeEnv.NODESPLAT_NODE_BIN, '/corral/tools/node-v22/bin/node');
+withNode.close();
+for (const bad of ['node', 'relative/node', '/has space/node', '']) {
+    assert.throws(() => new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'd'), profile: Object.assign({}, profile, {nodeBin: bad})}, {sharedPathMappings: mappings}), /nodeBin/, bad);
+}
+// image / sifCacheDir / runMode: optional, passed to the entry script, validated
+const runtime = new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'e'), profile: Object.assign({}, profile,
+    {image: 'docker://ghcr.io/org/img@sha256:' + 'a'.repeat(64), sifCacheDir: '/scratch/nodesplat/sifs', runMode: 'container'})}, {sharedPathMappings: mappings});
+const rtEnv = Object.fromEntries(runtime.buildJob({run_id: 'r', uuid: 'u', profile_id: 'p', lease_expires_at: Date.now() + 1000, job_name: 'j'}, 'tok')
+    .parameterSet.envVariables.map(e => [e.key, e.value]));
+assert.strictEqual(rtEnv.NODESPLAT_IMAGE, 'docker://ghcr.io/org/img@sha256:' + 'a'.repeat(64));
+assert.strictEqual(rtEnv.NODESPLAT_SIF_CACHE_DIR, '/scratch/nodesplat/sifs');
+assert.strictEqual(rtEnv.NODESPLAT_RUN_MODE, 'container');
+runtime.close();
+for (const key of ['NODESPLAT_IMAGE', 'NODESPLAT_SIF_CACHE_DIR', 'NODESPLAT_RUN_MODE']) assert.strictEqual(env[key], undefined, key + ' absent by default');
+for (const bad of [{image: 'ghcr.io/org/img'}, {image: 'docker://x; rm -rf /'}, {image: ''}, {sifCacheDir: 'relative'}, {sifCacheDir: '/has space'}, {runMode: 'nested'}]) {
+    assert.throws(() => new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'f'), profile: Object.assign({}, profile, bad)}, {sharedPathMappings: mappings}), /Invalid NodeSplat/, JSON.stringify(bad));
+}
 assert.throws(() => new SplatTasks({enabled: true, instanceId: 'i', storeDir: path.join(dir, 'b'), profile}, {sharedPathMappings: {}}), /Incomplete/);
 
 console.log('NodeSplat shared-root derivation tests passed');

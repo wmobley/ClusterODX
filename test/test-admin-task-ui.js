@@ -165,7 +165,7 @@ async function testApp(html) {
         return timerId;
     };
     global.clearInterval = id => timers.delete(id);
-    const components = Object.fromEntries(['TaskList', 'NodeList', 'Header', 'RefreshButton', 'AddInstanceButton']
+    const components = Object.fromEntries(['TaskList', 'NodeList', 'SplatList', 'Header', 'RefreshButton', 'AddInstanceButton']
         .map(name => [name, Object.defineProperty(() => {}, 'name', { value: name })]));
     global.__taskUi = { html, ...harness.hooks, ...components,
         clearAdminToken: () => { cleared++; },
@@ -174,13 +174,14 @@ async function testApp(html) {
             calls.push(url);
             if (url === '/r/info') return response({ name: 'ClusterODX', version: 'test' });
             if (url === '/r/node/list') return response([{ name: 'worker' }]);
+            if (url === '/r/splat/list') return response([]);
             assert.strictEqual(url, '/r/task/list');
             assert.ok(taskResponses.length, 'unexpected task fetch');
             return await taskResponses.shift();
         }
     };
     let source = read('../public/app.mjs').replace(/^import .*;\r?\n/gm, '');
-    source = `const { html, useState, useEffect, useCallback, useRef, TaskList, NodeList, Header,
+    source = `const { html, useState, useEffect, useCallback, useRef, TaskList, NodeList, SplatList, Header,
         RefreshButton, AddInstanceButton, clearAdminToken, getFetch, getStartupToken,
         validateAdminToken, cancelAdminValidation } = globalThis.__taskUi;\n${source}`;
     try {
@@ -198,7 +199,7 @@ async function testApp(html) {
         render();
         render();
         assert.strictEqual(component('TaskList').props.loading, true);
-        assert.deepStrictEqual(calls, ['/r/info', '/r/node/list', '/r/task/list']);
+        assert.deepStrictEqual(calls, ['/r/info', '/r/node/list', '/r/task/list', '/r/splat/list']);
         initial.resolve(response([{ uuid: 'first' }]));
         await turn();
         render();

@@ -76,7 +76,7 @@ export const NodeList = ({ nodes = [], getData = () => {} }) => {
       });
   };
   return html`<section class="dashboard-panel" aria-label="Nodes">
-    <h4>Registered Nodes <span class="badge bg-light text-dark">${nodes.length}</span></h4>
+    <h4>Registered NodeODX Nodes <span class="badge bg-light text-dark">${nodes.length}</span></h4>
     ${!nodes.length && html`<p class="text-muted">No registered nodes.</p>`}
     <div class="table-responsive"><table class="table table-hover table-striped">
     <thead>

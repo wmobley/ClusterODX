@@ -41,7 +41,7 @@ ClusterODX base URL only (for example `https://clusterodm.tacc.utexas.edu`). The
 | `maxLogBytes` / `maxPageLines` / `maxPageBytes` | 50 MiB / 500 / 256 KiB |
 | `grantMaxAgeSeconds` / `workerLeaseSeconds` | 300 / 86400 |
 | `grantKeys` | `{}` — `{ "<issuer>": { "<key_id>": "<secret>" } }` |
-| `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `callbackUrl`, `workerBindHost`, `workerPort`. Optional shared-storage overrides: `inputRoot`, `outputRoot` (this host's view) and `workerInputRoot`, `workerOutputRoot` (the LS6 view) |
+| `profile` | required: `baseUrl` (https), `tenantId`, `appId`, `appVersion`, `executionSystemId`, `archiveSystemId`, `queue`, `allocation`, `coresPerNode`, `memoryMB`, `maxMinutes`, `callbackUrl`, `workerBindHost`, `workerPort`. Optional `image` (a `docker://` reference for the all-in-one runtime image; pin `@sha256:` for a fixed runtime), `sifCacheDir` (absolute directory where the pulled image is cached; pre-warm it before the first job) and `runMode` (`container`, the default, or `host`). Optional `nodeBin` (absolute path to a Node.js >= 22 binary on the shared filesystem; passed to the job as `NODESPLAT_NODE_BIN` when the compute node has none on `PATH`). Optional shared-storage overrides: `inputRoot`, `outputRoot` (this host's view) and `workerInputRoot`, `workerOutputRoot` (the LS6 view) |
 
 Startup fails if `maxMinutes * 60 + 600 > workerLeaseSeconds`. There are no production
 defaults for any profile value. Secrets belong in deployment configuration only.

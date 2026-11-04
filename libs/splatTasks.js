@@ -7,12 +7,21 @@ const axios = require('axios');
 const {SplatTaskStore,UUID} = require('./splatTaskStore');
 const {SplatError,fail,canonical,hash,same,validateRequest,verifyGrant} = require('./splatAuth');
 const {workerRequest} = require('./splatNetwork');
+const {cancelTapisJob,isTerminalOutcome} = require('./tapisCancel');
 
 const defaults = {
     enabled:false, profileId:'nodesplat-v1', instanceId:'', storeDir:'data/splat-tasks',
     maxConcurrentRuns:1, maxLogBytes:52428800, maxPageLines:500, maxPageBytes:262144,
     maxResultBytes:8*1024*1024*1024, grantMaxAgeSeconds:300, workerLeaseSeconds:86400,
     grantKeys:{}, profile:{}
+};
+// Operator-facing log lines. Never pass tokens, secrets or request bodies here.
+const log = (level, message) => { try { require('./logger')[level]('[NODESPLAT] ' + message); } catch (_) { /* logging must never break a request */ } };
+// Tapis explains a rejected request in response.data.message; keep a short, token-free version of it.
+const tapisDetail = error => {
+    const data = error && error.response && error.response.data;
+    const message = data && typeof data.message === 'string' ? data.message : '';
+    return message.replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[token]').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 300);
 };
 const TERMINAL = new Set(['ready','failed','canceled']);
 const random = () => crypto.randomBytes(32).toString('base64url');
@@ -71,6 +80,11 @@ class SplatTasks {
             this.profile=Object.assign({},this.profile,resolveRoots(this.profile,dependencies.sharedPathMappings));
             const required=['baseUrl','tenantId','appId','appVersion','executionSystemId','archiveSystemId','queue','allocation','coresPerNode','memoryMB','maxMinutes','inputRoot','outputRoot','callbackUrl','workerBindHost','workerPort'];
             if(!this.config.instanceId || required.some(key=>!this.profile[key]) || this.profile.maxMinutes*60+600>this.config.workerLeaseSeconds) throw new Error('Incomplete NodeSplat fixed profile');
+            if(this.profile.nodeBin!==undefined && !/^\/[^\s\0]+$/.test(String(this.profile.nodeBin))) throw new Error('Invalid NodeSplat nodeBin: use an absolute path without spaces');
+            const pr=this.profile;
+            if(pr.image!==undefined && !/^docker:\/\/[A-Za-z0-9._\/@:+-]{1,255}$/.test(String(pr.image))) throw new Error('Invalid NodeSplat image: use a docker:// reference');
+            if(pr.sifCacheDir!==undefined && !/^\/[^\s\0]+$/.test(String(pr.sifCacheDir))) throw new Error('Invalid NodeSplat sifCacheDir: use an absolute path without spaces');
+            if(pr.runMode!==undefined && !['container','host'].includes(pr.runMode)) throw new Error('Invalid NodeSplat runMode: container or host');
             const base=new URL(this.profile.baseUrl);
             if(base.protocol!=='https:' || base.username || base.password || base.search || base.hash) throw new Error('Unsafe NodeSplat Tapis base URL');
             this.store=dependencies.store || new SplatTaskStore(this.config.storeDir);
@@ -112,6 +126,12 @@ class SplatTasks {
     buildJob(r,api) {
         const p=this.profile;
         const env={NODESPLAT_ENABLED:'YES',NODESPLAT_LEASE_DEADLINE:String(Math.floor(r.lease_expires_at/1000)),NODESPLAT_RUN_ID:r.run_id,NODESPLAT_CLUSTER_TASK_ID:r.uuid,NODESPLAT_PROFILE_ID:r.profile_id,NODESPLAT_INPUT_ROOT:p.workerInputRoot||p.inputRoot,NODESPLAT_OUTPUT_ROOT:p.workerOutputRoot||p.outputRoot,NODESPLAT_CALLBACK_URL:p.callbackUrl,NODESPLAT_API_CAPABILITY:api,NODESPLAT_BIND_HOST:p.workerBindHost,NODESPLAT_PORT:String(p.workerPort),NODESPLAT_APP_ID:p.appId,NODESPLAT_APP_VERSION:p.appVersion};
+        // Optional absolute path to a Node.js >= 22 binary on the shared filesystem (LS6 has none on PATH).
+        if(p.nodeBin) env.NODESPLAT_NODE_BIN=p.nodeBin;
+        // Optional runtime selection for the worker entry script (see opensplat-ls6 nodesplat_entry.sh).
+        if(p.image) env.NODESPLAT_IMAGE=p.image;
+        if(p.sifCacheDir) env.NODESPLAT_SIF_CACHE_DIR=p.sifCacheDir;
+        if(p.runMode) env.NODESPLAT_RUN_MODE=p.runMode;
         return {name:r.job_name,appId:p.appId,appVersion:p.appVersion,execSystemId:p.executionSystemId,execSystemLogicalQueue:p.queue,archiveSystemId:p.archiveSystemId,nodeCount:1,coresPerNode:p.coresPerNode,memoryMB:p.memoryMB,maxMinutes:p.maxMinutes,archiveOnAppError:true,parameterSet:{appArgs:p.appArgs||[],envVariables:Object.keys(env).map(key=>({key,value:env[key]})),schedulerOptions:[{name:'TACC Allocation',arg:`-A ${p.allocation}`}]}};
     }
     async create(body,owner,token) {
@@ -142,13 +162,17 @@ class SplatTasks {
             r.tapis_job_uuid=result.uuid;
             r.state=r.cancel_pending?'cancel_pending':'queued';
             r.phase=r.cancel_pending?'Stopping GPU worker':'Waiting for GPU worker';
+            log('info',`task ${r.uuid} run ${r.run_id}: Tapis accepted job ${r.tapis_job_uuid}`);
         } catch(error) {
             const status=error.response && error.response.status;
             if(status && status<500) {
+                const detail=tapisDetail(error);
                 r.state='failed'; r.phase='Submission rejected';
-                r.error={code:status===401?'signin_required':status===403?'tapis_forbidden':'submission_rejected',message:status===401?'Tapis rejected your session. Please sign in again.':status===403?'Tapis denied access to the GPU app or system.':`Tapis rejected the job (HTTP ${status}).`};
+                r.error={code:status===401?'signin_required':status===403?'tapis_forbidden':'submission_rejected',message:status===401?'Tapis rejected your session. Please sign in again.':`${status===403?'Tapis denied access to the GPU app or system':`Tapis rejected the job (HTTP ${status})`}${detail?`: ${detail}`:''}${detail&&/[.!?]$/.test(detail)?'':'.'}`};
                 r.revoked=true;
-            } else { r.state=r.cancel_pending?'cancel_pending':'submission_unknown'; r.phase='Checking whether Tapis accepted the worker'; }
+                log('warn',`task ${r.uuid} run ${r.run_id}: Tapis rejected the job (HTTP ${status})${detail?`: ${detail}`:''}`);
+            } else { r.state=r.cancel_pending?'cancel_pending':'submission_unknown'; r.phase='Checking whether Tapis accepted the worker';
+                log('warn',`task ${r.uuid} run ${r.run_id}: Tapis submission outcome unknown (${status||'no response'})`); }
         }
         this.save(r);
         return {status:202,record:r};
@@ -179,10 +203,27 @@ class SplatTasks {
             const result=await this.requestWorker(url,'/task/new',token,'POST',{run_id:r.run_id,source_task_id:r.source_task_id,manifest_sha256:r.manifest_sha256,settings:r.settings,'set-uuid':r.uuid});
             if(result.uuid!==r.uuid) fail(409,'worker_identity','Worker task identity does not match.');
             r.worker_started=true;
+            log('info',`task ${r.uuid}: worker registered at ${url} and started`);
             if(!TERMINAL.has(r.state) && r.state!=='cancel_pending' && r.state!=='result_ready') { r.state='running'; r.phase='Preparing training inputs'; }
             this.save(r);
             return {success:true,uuid:r.uuid};
         });
+    }
+    // Read-only admin view of NodeSplat workers. Never returns the worker token, grant or API hashes, or settings.
+    adminList() {
+        const registered=r=>Boolean(r.worker_url) && this.sessions.has(r.uuid);
+        return this.store.all().map(r=>({
+            uuid:r.uuid,
+            runId:r.run_id,
+            owner:r.owner && r.owner.username || null,
+            state:r.state,
+            phase:r.phase||null,
+            tapisJobUuid:r.tapis_job_uuid||null,
+            worker:r.worker_url?r.worker_url.replace(/^http:\/\//,'').replace(/\/$/,''):null,
+            registered:registered(r),
+            lastHeartbeat:r.last_heartbeat||null,
+            updatedAt:r.updated_at||null
+        })).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));
     }
     async verifyArtifacts(r) {
         const manifest=regularFile(this.profile.outputRoot,r.run_id,'manifest.json',1024*1024);
@@ -208,6 +249,7 @@ class SplatTasks {
                 try {
                     await this.verifyArtifacts(r);
                     r.state='result_ready'; r.phase='Training complete; releasing GPU worker'; r.ack_pending=true;
+                    log('info',`task ${r.uuid}: result_ready, artifacts verified`);
                 } catch(_) { r.phase='Training artifacts failed verification'; }
             } else if(code===30 || code===50) {
                 r.worker_terminal=code===30?'failed':'canceled';
@@ -253,8 +295,10 @@ class SplatTasks {
             try { await this.requestWorker(r.worker_url,'/task/cancel',api,'POST',{uuid:r.uuid}); } catch(_) { /* Scheduler stop remains authoritative. */ }
         }
         if(r.tapis_job_uuid) {
-            try { await this.api(token).put(`/v3/jobs/${encodeURIComponent(r.tapis_job_uuid)}`,{operation:'stop'}); }
-            catch(error) { if(error.response && error.response.status===401) fail(401,'signin_required','Cancellation is pending; please sign in again.'); }
+            const cancelled=await cancelTapisJob(this.api(token),r.tapis_job_uuid);
+            if(cancelled.outcome==='unauthorized' && cancelled.status===401) fail(401,'signin_required','Cancellation is pending; please sign in again.');
+            // Lazy: config.js requires this module for defaults, and the logger requires config.
+            if(!isTerminalOutcome(cancelled)) require('./logger').warn(`[NODESPLAT] Tapis job cancel ${cancelled.outcome} for ${r.tapis_job_uuid}: ${cancelled.message||cancelled.status||''}`);
         }
     }
     async cancel(r,token) {
