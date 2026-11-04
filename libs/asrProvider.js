@@ -120,6 +120,18 @@ module.exports = {
         }
     },
 
+    // Let a provider that tracks per-job credentials (Tapis) pick up a newer owner
+    // token seen on an authenticated request. No-op for other providers.
+    refreshOwnerToken: function(identifier, token){
+        if (!asrProvider || typeof asrProvider.refreshOwnerToken !== 'function') return false;
+        try{
+            return asrProvider.refreshOwnerToken(identifier, token);
+        }catch(e){
+            logger.warn(`ASR token refresh failed: ${e.message}`);
+            return false;
+        }
+    },
+
     vacuum: async function(){
         // Providers that track jobs beyond docker-machine semantics (Tapis) sweep
         // their own registry; the generic loop below only understands docker-machine.

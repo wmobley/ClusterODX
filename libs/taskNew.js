@@ -517,7 +517,7 @@ module.exports = {
                 status.aborted = true;
             });
 
-            const abortTask = () => {
+            const abortTask = (requestToken = null) => {
                 eventEmitter.emit('abort');
                 if (sharedSource && node) {
                     Promise.resolve(node.taskCancel(uuid)).catch(error => logger.warn(`Shared task cancellation failed: ${error.message}`));
@@ -527,7 +527,7 @@ module.exports = {
                     // destroyMachine is asynchronous; a failed cancellation must be a
                     // warning here, never an unhandled rejection.
                     Promise.resolve()
-                        .then(() => asr.destroyMachine(dmHostname))
+                        .then(() => asr.destroyMachine(dmHostname, requestToken))
                         .catch(e => logger.warn(`Could not destroy machine ${dmHostname} (user ${describeTokenUser(token)}): ${e.message || e}`));
                 }
             };

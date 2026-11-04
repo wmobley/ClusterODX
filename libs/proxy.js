@@ -528,6 +528,8 @@ module.exports = {
                         concurrencyMonitor.decreaseCount(query.token);
 
                         let node = await routetable.lookupNode(taskId);
+                        // The owner's current token may outlive the one captured at submit.
+                        asrProvider.refreshOwnerToken(node && typeof node.getTapisJobId === 'function' ? node.getTapisJobId() : taskId, query.token);
                         if (node){
                             overrideRequest(req, node, query, pathname);
                             proxy.web(req, res, {
@@ -539,7 +541,7 @@ module.exports = {
                             if (taskTableEntry && taskTableEntry.taskInfo){
                                 if (pathname === '/task/cancel' || pathname === '/task/remove'){
                                     if (taskTableEntry.abort){
-                                        taskTableEntry.abort();
+                                        taskTableEntry.abort(query.token);
                                         taskTableEntry.abort = null;
                                         logger.info(`Task ${taskId} aborted via ${pathname}`);
                                     }
@@ -556,6 +558,16 @@ module.exports = {
                                     }
 
                                     json(res, { success: true });
+                                }else if (pathname === '/task/restart' && taskTableEntry.taskInfo.status &&
+                                          [statusCodes.CANCELED, statusCodes.FAILED].includes(taskTableEntry.taskInfo.status.code)){
+                                    // The task never reached a node and is finished from the cluster's
+                                    // point of view. Forget it, so a client that treats this reply as a
+                                    // successful restart gets "not found" on its next poll and resubmits
+                                    // instead of reading the terminal status back as the restart result.
+                                    if (/^[\w\d]+-[\w\d]+-[\w\d]+-[\w\d]+-[\w\d]+$/.test(taskId)) utils.rmdir(`tmp/${taskId}`);
+                                    await tasktable.delete(taskId);
+                                    logger.info(`Task ${taskId} dropped on /task/restart (no node, status ${taskTableEntry.taskInfo.status.code})`);
+                                    json(res, { error: `Task ${taskId} is no longer available on the cluster. Please create a new task.` });
                                 }else{
                                     json(res, { error: `Action not supported. Please create a new task.` });
                                 }
@@ -591,6 +603,9 @@ module.exports = {
                         // the URL to fetch from S3.
                         const downloadsPath = asrProvider.downloadsPath();
                         const node = await routetable.lookupNode(taskId);
+                        if (action === 'info'){
+                            asrProvider.refreshOwnerToken(node && typeof node.getTapisJobId === 'function' ? node.getTapisJobId() : taskId, query.token);
+                        }
                         const isDownloadAction = action.indexOf('download/') === 0;
                         const asrInstance = asrProvider.get();
                         const asrDriver = asrInstance && typeof asrInstance.getDriverName === 'function'

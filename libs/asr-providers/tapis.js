@@ -102,6 +102,16 @@ const mappingDefault = (mapping, key, fallback) => {
     return value === undefined || value === null || value === '' ? fallback : value;
 };
 
+// The state a job returns to once a usable token is in memory again. An unreachable
+// record keeps the state it was in when the token ran out (registered, cancelRequested,
+// ...) so the vacuum neither cancels a live worker as "never registered" nor forgets a
+// pending cancel. Records marked unreachable before this field existed fall back to
+// submitted.
+const reachableState = record => {
+    if (!record || record.state !== STATES.UNREACHABLE) return record ? record.state : null;
+    return record.unreachableFrom && record.unreachableFrom !== STATES.UNREACHABLE ? record.unreachableFrom : STATES.SUBMITTED;
+};
+
 const sameUser = (pending, identity) => {
     if (!pending || !identity) return false;
     const owner = pending.tapisJobOwner || pending.nodeUser;
@@ -870,6 +880,53 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return this.registry.upsert(record);
     }
 
+    // Any authenticated request from the job owner (WebODM info polls, cancel,
+    // restart) may carry a newer token than the one captured at submit. Keep the
+    // freshest one so cancellation and the vacuum keep working after the original
+    // expires. Only the owner's own token is adopted, and only when it outlives
+    // the one in memory. Returns true when a token was replaced.
+    refreshOwnerToken(identifier, token) {
+        if (!identifier || !token || typeof token !== 'string') return false;
+        const identity = extractUserFromToken(token);
+        if (!identity || !identity.expiresAt) return false; // Tapis JWTs always carry exp
+        if (identity.expiresAt <= Date.now()) return false;
+
+        const pending = this.findPendingTask(identifier);
+        const record = this.registry ? this.registry.get(identifier) : null;
+        const tapisJobId = (pending && pending.tapisJobId) || (record && record.tapisJobId) || identifier;
+        let active = this.activeJobs.get(tapisJobId) || null;
+        const owner = pending || active ||
+            (record && record.owner ? { tapisJobOwner: record.owner, tapisJobOwnerTenant: record.ownerTenant } : null);
+        if (!owner || !sameUser(owner, identity)) return false;
+
+        const expiryOf = candidate => {
+            const claims = extractUserFromToken(candidate);
+            return claims && claims.expiresAt ? claims.expiresAt : 0;
+        };
+        const currentExpiry = Math.max(expiryOf(pending && pending.token), expiryOf(active && active.token));
+        if (identity.expiresAt <= currentExpiry) return false;
+
+        if (pending) pending.token = token;
+        if (!active && record && record.tapisJobId) {
+            // The pending entry was consumed (cancel in flight, or restored after a restart);
+            // keep the token where tokenFor() and the vacuum look for it.
+            active = { tapisJobId, tapisJobOwner: record.owner, tapisJobOwnerTenant: record.ownerTenant };
+            this.activeJobs.set(tapisJobId, active);
+        }
+        if (active) active.token = token;
+        const target = record || (this.registry && this.registry.get(tapisJobId));
+        if (target) {
+            this.recordUpsert({
+                jobName: target.jobName,
+                bearerExpiresAt: identity.expiresAt,
+                unauthorizedCount: 0,
+                state: reachableState(target)
+            });
+        }
+        logger.info(`[TAPIS] adopted a newer token for job ${tapisJobId} from ${identity.fullUser}`);
+        return true;
+    }
+
     // A restored record gets the worker's validated bearer so it can be cancelled later.
     adoptToken(tapisJobId, token) {
         const active = this.activeJobs.get(tapisJobId);
@@ -883,7 +940,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 jobName: record.jobName,
                 bearerExpiresAt: identity ? identity.expiresAt : null,
                 unauthorizedCount: 0,
-                state: record.state === STATES.UNREACHABLE ? STATES.SUBMITTED : record.state
+                state: reachableState(record)
             });
         }
     }
@@ -901,7 +958,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             reason
         })}`);
         if (dryRun) return record;
-        return this.recordState(record.jobName, STATES.UNREACHABLE, { reason, unreachableAt: Date.now() });
+        return this.recordState(record.jobName, STATES.UNREACHABLE, { reason, unreachableAt: Date.now(), unreachableFrom: record.state });
     }
 
     // Called by the registration webhook once the task has been handed to the worker.
@@ -1202,9 +1259,12 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return pending;
     }
 
-    async cancelPendingTask(identifier) {
+    async cancelPendingTask(identifier, requestToken = null) {
         const pending = this.findPendingTask(identifier);
         if (!pending) return false;
+        // The cancelling request usually carries the owner's current token, which
+        // may be newer than the one captured at submit.
+        if (requestToken) this.refreshOwnerToken(identifier, requestToken);
         // Consume first: once a cancel is requested the task must never be handed
         // to a worker, even if Tapis refuses or times out below.
         this.consumePendingTask(identifier);
@@ -1223,8 +1283,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return true;
     }
 
-    async destroyMachine(identifier) {
-        return this.cancelPendingTask(identifier);
+    async destroyMachine(identifier, requestToken = null) {
+        return this.cancelPendingTask(identifier, requestToken);
     }
 
     async destroyNode(node) {
