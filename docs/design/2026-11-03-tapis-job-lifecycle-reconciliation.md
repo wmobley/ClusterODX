@@ -394,6 +394,25 @@ Manual on LS6, pass criteria in log lines:
   separate deployments.
 - A restored pending record adopts the registering worker's validated bearer so the
   route and later cancellation have a token; the spec only implied this.
+- **Deviation, 2026-11-04 (production incident):** offline-worker removal was gated on
+  having a usable token and on the record being open. On 2026-11-04 both workers'
+  records were marked `unreachable` ("token expired") at 15:10Z while the workers were
+  still processing; once their Slurm jobs hit the wall limit, nothing removed the nodes
+  or their nine routes, and the admin page showed them as "Assigned to worker"
+  indefinitely. Fix: the vacuum now sweeps Tapis-backed nodes before the record pass
+  and removes any node offline on `consecutiveIdleTicks` consecutive sweeps and for
+  longer than `maxUploadTime` since first seen offline, regardless of token or
+  registry state (local hygiene needs no Tapis call; `destroyNode` still cancels when
+  it can). QA found that `Node.updateInfo` zeroes `lastRefreshed` on any failed probe,
+  so the spec's "offline longer than maxUploadTime" rule had in practice been "offline
+  on three sweeps"; the sweep therefore keeps its own first-seen-offline time in
+  memory. `destroyNode` no longer sends a cancel with an expired bearer or for a record
+  already `unreachable`; it emits the operator line directly. A `registered` record
+  whose node still exists is no longer marked `unreachable` on token loss or expiry;
+  that happens only once a cancel is actually needed, which also means an idle worker
+  with an expired bearer runs to its Slurm limit (accepted: it can still take other
+  users' tasks). The per-record `offlineTicks` field is no longer written. Rejected
+  alternative: persisting tokens so the old path could cancel; still out of scope.
 
 ## User feedback / decisions
 

@@ -691,7 +691,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         const idleMs = (Number(this.getConfig('maxUploadTime', 3600)) || 3600) * 1000;
         const idleTicks = Number(this.getConfig('tapis.consecutiveIdleTicks', 3)) || 3;
         const retentionMs = (Number(this.getConfig('tapis.registryRetentionDays', 7)) || 7) * 24 * 3600 * 1000;
-        const now = Date.now();
+        const now = typeof deps.now === 'function' ? deps.now() : Date.now();
         const actions = [];
 
         const act = async (record, action, run) => {
@@ -717,10 +717,46 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         const maxUnauthorized = Number(this.getConfig('tapis.maxUnauthorizedCancelRetries', 3)) || 3;
 
         try {
+            // Local hygiene first, with or without a token. A Tapis worker that has not
+            // answered for longer than maxUploadTime is gone (wall limit, crash or an
+            // external cancel) and must not keep a node entry or routes. No Tapis call
+            // is needed to drop it; destroyNode cancels when it can and otherwise emits
+            // the operator line. The silence is measured from the first sweep that found
+            // the node offline (a failed probe zeroes Node.lastRefreshed, so that value
+            // cannot be used) and lives in memory: a restart only delays removal.
+            const offline = this.offlineByJob || (this.offlineByJob = new Map());
+            const tapisNodes = typeof nodes.filter === 'function'
+                ? nodes.filter(n => typeof n.getTapisJobId === 'function' && n.getTapisJobId()) : [];
+            for (const node of tapisNodes) {
+                const tapisJobId = node.getTapisJobId();
+                try {
+                    if (node.isOnline()) { offline.delete(tapisJobId); continue; }
+                    const seen = offline.get(tapisJobId) || { ticks: 0, since: now };
+                    seen.ticks += 1;
+                    offline.set(tapisJobId, seen);
+                    if (seen.ticks < idleTicks || now - seen.since <= idleMs) continue;
+                    const record = this.registry.get(tapisJobId)
+                        || { jobName: null, tapisJobId, owner: null, ownerTenant: null, state: null, queue: null };
+                    await act(record, 'remove offline worker', async () => {
+                        if (await removeAndCleanupNode(node)) offline.delete(tapisJobId);
+                    });
+                } catch (error) {
+                    logger.warn(`[TAPIS] vacuum skipped offline check for ${node}: ${error.message}`);
+                }
+            }
+            for (const tapisJobId of offline.keys()) {
+                if (!tapisNodes.some(n => n.getTapisJobId() === tapisJobId)) offline.delete(tapisJobId);
+            }
+
             for (const record of this.registry.open()) {
                 try {
                     const token = record.tapisJobId ? this.tokenFor(record.tapisJobId) : null;
                     const age = now - Number(record.submittedAt || record.createdAt || now);
+                    // A registered worker whose node still exists needs no token to be left
+                    // alone: it becomes an orphan only once something has to be cancelled.
+                    // Offline nodes are removed by the sweep above; destroyNode reports then.
+                    const hasWorker = record.state === STATES.REGISTERED
+                        && !!nodes.find(n => typeof n.getTapisJobId === 'function' && n.getTapisJobId() === record.tapisJobId);
 
                     if (!record.tapisJobId) {
                         // Submitted but never confirmed; Tapis may or may not have created it.
@@ -732,12 +768,12 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                     }
 
                     if (!token) {
-                        if (age > this.maxQueueWaitMs(record.queue) + graceMs) markUnreachable(record, 'no token in memory');
+                        if (!hasWorker && age > this.maxQueueWaitMs(record.queue) + graceMs) markUnreachable(record, 'no token in memory');
                         continue;
                     }
 
                     if (record.bearerExpiresAt && record.bearerExpiresAt <= now) {
-                        markUnreachable(record, 'token expired');
+                        if (!hasWorker) markUnreachable(record, 'token expired');
                         continue;
                     }
 
@@ -810,22 +846,20 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                             const routes = await routetable.findByNode(node);
                             const busy = node.getInfoProperty('taskQueueCount', 0) > 0 || (routes && Object.keys(routes).length > 0) || node.transients > 0;
                             if (busy) {
-                                if (record.idleTicks || record.offlineTicks) this.recordUpsert({ jobName: record.jobName, idleTicks: 0, idleSince: null, offlineTicks: 0 });
+                                if (record.idleTicks) this.recordUpsert({ jobName: record.jobName, idleTicks: 0, idleSince: null });
                                 continue;
                             }
                             const ticks = (record.idleTicks || 0) + 1;
                             const idleSince = record.idleSince || now;
-                            this.recordUpsert({ jobName: record.jobName, idleTicks: ticks, idleSince, offlineTicks: 0 });
+                            this.recordUpsert({ jobName: record.jobName, idleTicks: ticks, idleSince });
                             if (ticks >= idleTicks && now - idleSince > idleMs) {
                                 await act(record, 'remove idle worker', () => removeAndCleanupNode(node));
                             }
                             continue;
                         }
-                        const offlineTicks = (record.offlineTicks || 0) + 1;
-                        this.recordUpsert({ jobName: record.jobName, offlineTicks, idleTicks: 0 });
-                        if (offlineTicks >= idleTicks && now - node.getLastRefreshed() > idleMs) {
-                            await act(record, 'remove offline worker', () => removeAndCleanupNode(node));
-                        }
+                        // Offline: the node sweep at the top of this pass removes it once it has
+                        // been silent for maxUploadTime, token or not. Idle counting restarts.
+                        if (record.idleTicks) this.recordUpsert({ jobName: record.jobName, idleTicks: 0, idleSince: null });
                     }
                 } catch (error) {
                     logger.warn(`[TAPIS] vacuum skipped ${record.jobName}: ${error.message}`);
@@ -1250,6 +1284,15 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         if (!active || !active.token) {
             logger.warn(`[TAPIS] cannot cancel job ${tapisJobId} for ${node}: no token in memory`);
             this.markUnreachable(tapisJobId, 'node removed but no token in memory (submitted before a restart)');
+            return false;
+        }
+        // An expired bearer cannot cancel anything; say so once instead of sending a
+        // request that fails 401 and reopening a record already given up on.
+        const identity = extractUserFromToken(active.token);
+        const record = this.registry && this.registry.get(tapisJobId);
+        if ((identity && identity.expiresAt && identity.expiresAt <= Date.now()) || (record && record.state === STATES.UNREACHABLE)) {
+            logger.warn(`[TAPIS] cannot cancel job ${tapisJobId} for ${node}: token expired`);
+            this.markUnreachable(tapisJobId, 'node removed but token expired');
             return false;
         }
         this.recordState(tapisJobId, STATES.CANCEL_REQUESTED, { cancelRequestedAt: Date.now() });

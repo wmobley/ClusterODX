@@ -361,8 +361,23 @@ route and for later cancellation.
 ### Vacuum
 
 `TapisAsrProvider.vacuum()` runs every `tapis.vacuumIntervalSeconds` (default
-120) and from the generic ASR vacuum. For each open record, while a token is in
-memory:
+120) and from the generic ASR vacuum.
+
+It first sweeps every Tapis-backed node, with or without a token: a worker that
+has been offline on `tapis.consecutiveIdleTicks` consecutive sweeps and for
+longer than `maxUploadTime` since the first sweep that found it offline is
+removed together with its routes (`[TAPIS] vacuum remove offline worker`). The
+silence is measured from that first observation, not from the node's last
+successful probe, because a failed probe resets `lastRefreshed` to 0. Removal
+goes through `destroyNode`, which cancels the job when a valid token is in
+memory and otherwise emits the operator line once (an expired bearer is not
+tried). Offline counting is in memory, so after a restart a dead worker is
+removed about `maxUploadTime` after the first post-restart sweep. In dry-run
+mode the sweep logs `vacuum would remove offline worker` on every sweep past the
+deadline. This is what clears "Assigned to worker" rows for a worker whose Slurm
+job already hit its wall limit.
+
+Then, for each open record, while a token is in memory:
 
 - `submitted` and Tapis reports a pre-run status (PENDING … QUEUED, BLOCKED):
   wait up to `tapis.maxQueueWaitMinutes[queue]` (defaults `vm-small` 240,
@@ -373,13 +388,16 @@ memory:
 - `registered`, node online, no route, `taskQueueCount` 0 and no transient upload
   for longer than `maxUploadTime` (default 3600 s) across
   `tapis.consecutiveIdleTicks` (default 3) ticks: remove the node and cancel.
-- `registered`, node offline for longer than `maxUploadTime` across the same
-  number of ticks, or node missing from the registry: remove and cancel.
+- `registered` but the node is missing: cancel.
 - `cancelRequested`/`cancelFailed`: retry the cancel.
 - Tapis reports FINISHED/CANCELLED/FAILED or 404: close the record and drop the
   node.
 - No token in memory, or `bearerExpiresAt` passed: mark `unreachable` and emit the
-  operator line once.
+  operator line once. A `registered` record whose node still exists is exempt: a
+  worker that is still answering is not an orphan just because its submitter's
+  bearer aged out. Such a worker is also not idle-removed (that needs a cancel),
+  so if it sits idle it runs to its Slurm limit; once it goes offline the node
+  sweep removes it and `destroyNode` emits the operator line then.
 
 Closed records older than `tapis.registryRetentionDays` (default 7) are pruned.
 With `tapis.vacuumDryRun: true` the sweep logs `[TAPIS] vacuum would …` and
