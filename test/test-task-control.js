@@ -32,11 +32,27 @@ const post = (port, action, body, contentType, token = 'owner-token') => new Pro
     req.end(body);
 });
 
+const get = (port, path, token = 'owner-token') => new Promise((resolve, reject) => {
+    const req = http.request({ hostname: '127.0.0.1', port, path: `${path}?token=${token}`, method: 'GET' }, res => {
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+            try { resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }); }
+            catch (error) { reject(error); }
+        });
+    });
+    req.setTimeout(2000, () => req.destroy(new Error('Task info request timed out')));
+    req.on('error', reject);
+    req.end();
+});
+
 (async () => {
     const forwarded = [];
     const pending = new Map();
     const cleanups = [];
     const warnings = [];
+    const refreshes = [];
+    const abortTokens = [];
     let aborts = 0;
     let decreases = 0;
     let routed = false;
@@ -57,6 +73,10 @@ const post = (port, action, body, contentType, token = 'owner-token') => new Pro
         './classes/ValueCache': class {},
         './utils': { ...utils, cleanupTemporaryDirectory() {}, rmdir: dir => cleanups.push(dir) },
         './accessLog': () => {},
+        './asrProvider': {
+            refreshOwnerToken: (identifier, token) => { refreshes.push([identifier, token]); return false; },
+            get: () => null, downloadsPath: () => null, cleanup() {}, onCommit() {}
+        },
         './logger': { warn: message => warnings.push(message), info() {} },
         './routetable': { initialize: async () => {}, lookupNode: async uuid => routed && uuid === UUID ? node : null },
         './tasktable': {
@@ -77,8 +97,8 @@ const post = (port, action, body, contentType, token = 'owner-token') => new Pro
     try {
         await listen(server);
         const port = server.address().port;
-        const seed = () => pending.set(UUID, {
-            taskInfo: { status: { code: statusCodes.RUNNING } }, abort() { aborts++; }
+        const seed = (code = statusCodes.RUNNING) => pending.set(UUID, {
+            taskInfo: { status: { code } }, abort(token) { aborts++; abortTokens.push(token); }
         });
 
         seed();
@@ -87,6 +107,37 @@ const post = (port, action, body, contentType, token = 'owner-token') => new Pro
         assert.strictEqual(aborts, 1);
         assert.strictEqual(pending.get(UUID).taskInfo.status.code, statusCodes.CANCELED);
         assert.deepStrictEqual(cleanups, [`tmp/${UUID}`]);
+        assert.deepStrictEqual(abortTokens, ['owner-token'], 'the cancelling request token reaches the abort hook');
+        assert.deepStrictEqual(refreshes, [[UUID, 'owner-token']], 'control requests offer the request token to the ASR provider');
+
+        // Restarting a placeholder that already ended (canceled or failed, never routed to a
+        // node) forgets it so the client resubmits instead of re-reading the terminal status.
+        for (const code of [statusCodes.CANCELED, statusCodes.FAILED]) {
+            seed(code);
+            result = await post(port, 'restart', JSON.stringify({ uuid: UUID }), 'application/json');
+            assert.match(result.body.error, /no longer available on the cluster/);
+            assert.strictEqual(pending.has(UUID), false, `restart drops a status-${code} placeholder`);
+            assert.strictEqual(cleanups[cleanups.length - 1], `tmp/${UUID}`);
+        }
+        assert.strictEqual(aborts, 1, 'dropping a finished placeholder does not abort anything');
+
+        // A free-form id never reaches rmdir, but the entry is still forgotten.
+        pending.set('not-a-uuid', { taskInfo: { status: { code: statusCodes.CANCELED } } });
+        const cleanupsBefore = cleanups.length;
+        result = await post(port, 'restart', JSON.stringify({ uuid: 'not-a-uuid' }), 'application/json');
+        assert.match(result.body.error, /no longer available on the cluster/);
+        assert.strictEqual(pending.has('not-a-uuid'), false);
+        assert.strictEqual(cleanups.length, cleanupsBefore, 'no rmdir for an id that is not uuid-shaped');
+
+        // Status polls offer the request token to the ASR provider as well.
+        seed();
+        refreshes.length = 0;
+        result = await get(port, `/task/${UUID}/info`);
+        assert.strictEqual(result.body.status.code, statusCodes.RUNNING);
+        assert.deepStrictEqual(refreshes, [[UUID, 'owner-token']], 'info polls refresh the owner token');
+        refreshes.length = 0;
+        await get(port, `/task/${UUID}/output`);
+        assert.deepStrictEqual(refreshes, [], 'only info polls refresh the token');
 
         seed();
         result = await post(port, 'remove', JSON.stringify({ uuid: UUID }), 'application/json');
@@ -96,7 +147,8 @@ const post = (port, action, body, contentType, token = 'owner-token') => new Pro
 
         seed();
         result = await post(port, 'restart', JSON.stringify({ uuid: UUID }), 'application/json');
-        assert.match(result.body.error, /Please create a new task/);
+        assert.match(result.body.error, /Action not supported/);
+        assert.strictEqual(pending.has(UUID), true, 'an in-flight placeholder is kept on restart');
         assert.strictEqual(aborts, 2);
 
         routed = true;

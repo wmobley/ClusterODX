@@ -347,6 +347,21 @@ A WebODM `/task/cancel` first removes the pending task so it can never be handed
 to a late worker, then cancels the Tapis job. A failed cancel is parked and
 retried by the vacuum while the user's token is still valid in memory.
 
+The token used is the freshest one seen from the job owner, not necessarily the
+one captured at submit. Every authenticated task request from WebODM (`/task/<uuid>/info`
+polls, `/task/cancel`, `/task/restart`, `/task/remove`) offers its token to the provider
+(`refreshOwnerToken`); a token is adopted only when it belongs to the job owner and expires
+later than the one in memory. Adoption clears `unauthorizedCount`, records the new
+`bearerExpiresAt`, and moves an `unreachable` job back to the state it was in when the
+token ran out (`unreachableFrom`: `registered`, `cancelFailed`, ...; `submitted` for records
+written before that field existed). This is what lets a user who logged in again cancel a
+job submitted hours earlier.
+
+`/task/restart` for a task that never reached a node and is already `CANCELED` or `FAILED`
+drops the task-table entry and answers with an error asking for a new task. A client that
+mistakes that reply for success then gets "no task table entry" on its next poll and
+resubmits, instead of reading the terminal status back forever.
+
 ### Job registry
 
 `data/tapis-jobs.json` records every job ClusterODX asked Tapis for, written
