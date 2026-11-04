@@ -64,7 +64,7 @@ const makeProvider = async (extra = {}) => {
         const routes = new Map();
         const removed = [];
         const deps = {
-            nodes: { find: fn => nodeList.find(fn), remove: n => { nodeList.splice(nodeList.indexOf(n), 1); } },
+            nodes: { find: fn => nodeList.find(fn), filter: fn => nodeList.filter(fn), remove: n => { nodeList.splice(nodeList.indexOf(n), 1); } },
             routetable: { findByNode: async n => routes.get(n) || {}, removeByNode: async () => {} },
             removeAndCleanupNode: async node => { removed.push(node.tapisJobId); nodeList.splice(nodeList.indexOf(node), 1); return true; }
         };
@@ -104,6 +104,12 @@ const makeProvider = async (extra = {}) => {
         // l. closed long ago: pruned.
         provider.registry.upsert({ jobName: 'clusterodx-0-old', state: STATES.DONE, updatedAt: Date.now() - 30 * 24 * HOUR, createdAt: Date.now() - 30 * 24 * HOUR });
         provider.registry.records.get('clusterodx-0-old').updatedAt = Date.now() - 30 * 24 * HOUR;
+        // m. registered, bearer expired, worker online and busy: not an orphan, left alone.
+        seed('clusterodx-0-livexp', 'u-livexp', STATES.REGISTERED, { bearerExpiresAt: Date.now() - 1000 }); tapisJobs.set('u-livexp', { status: 'RUNNING' });
+        const liveExpiredNode = fakeNode('u-livexp'); nodeList.push(liveExpiredNode); routes.set(liveExpiredNode, { 'task-y': {} });
+        // n. registered, no token (restart), worker offline: left alone by the record pass (sweep tested below).
+        seed('clusterodx-0-deadnotoken', 'u-deadnotoken', STATES.REGISTERED, {}, false);
+        nodeList.push(fakeNode('u-deadnotoken', { online: false, lastRefreshed: 0 }));
 
         let result = await provider.vacuum(deps);
         await provider.registry.flush();
@@ -131,6 +137,9 @@ const makeProvider = async (extra = {}) => {
         assert.ok(!cancels.includes('/v3/jobs/u-finished/cancel'), 'finished job is not cancelled');
         assert.strictEqual(stateOf('clusterodx-0-never'), STATES.DONE);
         assert.strictEqual(provider.registry.get('clusterodx-0-old'), null, 'old closed record pruned');
+        assert.strictEqual(stateOf('clusterodx-0-livexp'), STATES.REGISTERED, 'expired bearer alone does not orphan a live worker');
+        assert.strictEqual(stateOf('clusterodx-0-deadnotoken'), STATES.REGISTERED, 'offline worker without a token is not orphaned either');
+        assert.ok(!removed.includes('u-deadnotoken'), 'one offline tick is not enough');
 
         // Two more ticks: the idle worker goes; unreachable is logged once only.
         await provider.vacuum(deps);
@@ -138,6 +147,83 @@ const makeProvider = async (extra = {}) => {
         await provider.registry.flush();
         assert.ok(removed.includes('u-idle'), 'idle worker removed after three ticks past maxUploadTime');
         assert.strictEqual(errors.filter(e => e.includes('orphan requires operator action')).length, 2, 'operator line is emitted once per orphan');
+        assert.ok(!removed.includes('u-deadnotoken'), 'three ticks within minutes are not maxUploadTime of silence');
+        assert.strictEqual(stateOf('clusterodx-0-deadnotoken'), STATES.REGISTERED);
+        assert.ok(nodeList.includes(liveExpiredNode), 'live worker with an expired bearer is kept');
+        assert.strictEqual(stateOf('clusterodx-0-livexp'), STATES.REGISTERED);
+
+        // Offline node sweep, on its own provider with an injected clock. Removal goes
+        // through the real destroyNode so the registry, cancel and operator-line paths run.
+        {
+            const sweep = await makeProvider();
+            sweep.createApiClient = provider.createApiClient;
+            let clock = Date.now();
+            const MIN = 60 * 1000;
+            const list = [];
+            const routesRemoved = [];
+            const sweepDeps = {
+                now: () => clock,
+                nodes: { find: fn => list.find(fn), filter: fn => list.filter(fn), remove: n => { list.splice(list.indexOf(n), 1); } },
+                routetable: { findByNode: async () => ({}), removeByNode: async n => { routesRemoved.push(n.tapisJobId); } },
+                removeAndCleanupNode: async node => { await sweep.destroyNode(node); await sweepDeps.routetable.removeByNode(node); sweepDeps.nodes.remove(node); return true; }
+            };
+            const seedSweep = (jobName, uuid, fields = {}, tok = token) => {
+                sweep.registry.upsert(Object.assign({ jobName, tapisJobId: uuid, taskId: `task-${jobName}`, state: STATES.REGISTERED, owner: 'alice', ownerTenant: 'portals', queue: 'vm-small', submittedAt: clock }, fields));
+                if (tok) sweep.activeJobs.set(uuid, { jobId: jobName, token: tok, status: 'RUNNING' });
+            };
+            const dead = id => fakeNode(id, { online: false, lastRefreshed: 0 });
+            // The production incident: registered, bearer expired, worker dead at its wall limit.
+            const expiredJwt = makeJwt('alice', 'portals', -600);
+            seedSweep('clusterodx-0-incident', 'u-incident', { bearerExpiresAt: clock - 600 * 1000 }, expiredJwt); tapisJobs.set('u-incident', { status: 'FINISHED' });
+            list.push(dead('u-incident'));
+            // No token at all (restart): removed, one operator line.
+            seedSweep('clusterodx-0-restart', 'u-restart', {}, null); tapisJobs.set('u-restart', { status: 'RUNNING' });
+            list.push(dead('u-restart'));
+            // Valid token and Tapis still says RUNNING: removed and cancelled.
+            seedSweep('clusterodx-0-running-dead', 'u-running-dead'); tapisJobs.set('u-running-dead', { status: 'RUNNING' });
+            list.push(dead('u-running-dead'));
+            // No registry record (pre-registry worker): removed, no operator line.
+            list.push(dead('u-norecord'));
+            // Comes back online before the deadline: counter resets.
+            const blip = dead('u-blip'); list.push(blip);
+
+            const errorsBefore = errors.length;
+            const cancelsBefore = cancels.length;
+            await sweep.vacuum(sweepDeps);                       // tick 1 at t0
+            clock += 30 * MIN; await sweep.vacuum(sweepDeps);    // tick 2 at t0+30m
+            assert.strictEqual(list.length, 5, 'two ticks and half an hour remove nothing');
+            blip.isOnline = () => true;
+            clock += 31 * MIN; await sweep.vacuum(sweepDeps);    // tick 3 at t0+61m
+            await sweep.registry.flush();
+            assert.deepStrictEqual(list.map(n => n.tapisJobId), ['u-blip'], 'offline workers removed after three ticks and maxUploadTime; the one that came back is kept');
+            assert.deepStrictEqual(routesRemoved.sort(), ['u-incident', 'u-norecord', 'u-restart', 'u-running-dead'], 'routes are dropped with each node');
+            assert.strictEqual(sweep.registry.get('clusterodx-0-incident').state, STATES.UNREACHABLE, 'expired bearer: nothing to cancel with, operator told');
+            assert.ok(!cancels.includes('/v3/jobs/u-incident/cancel'), 'no cancel is attempted with an expired bearer');
+            assert.strictEqual(sweep.registry.get('clusterodx-0-restart').state, STATES.UNREACHABLE);
+            assert.strictEqual(sweep.registry.get('clusterodx-0-running-dead').state, STATES.DONE, 'valid token: job cancelled and closed');
+            assert.ok(cancels.includes('/v3/jobs/u-running-dead/cancel'));
+            assert.strictEqual(cancels.length, cancelsBefore + 1, 'exactly one cancel request across the sweep');
+            const operatorLines = errors.slice(errorsBefore).filter(e => e.includes('orphan requires operator action'));
+            assert.strictEqual(operatorLines.length, 2, 'one operator line each for the expired and the tokenless job, none for the recordless node');
+            assert.ok(messages.some(m => m.includes('vacuum remove offline worker') && m.includes('"user":"unknown"')), 'recordless removal is logged');
+            // The reset counter starts over: three quick ticks after the blip do not remove it.
+            blip.isOnline = () => false;
+            for (let i = 0; i < 3; i++) { clock += MIN; await sweep.vacuum(sweepDeps); }
+            assert.ok(list.includes(blip), 'counter restarted when the node came back');
+            // A later tick does not log the incident again.
+            clock += MIN; await sweep.vacuum(sweepDeps);
+            assert.strictEqual(errors.slice(errorsBefore).filter(e => e.includes('orphan requires operator action')).length, 2, 'operator line stays once per job');
+
+            // Dry run: the sweep only announces.
+            const dryIdle = await makeProvider({ tapis: { vacuumDryRun: true } });
+            const dryList = [dead('u-dry-dead')];
+            const dryDeps = Object.assign({}, sweepDeps, { nodes: { find: fn => dryList.find(fn), filter: fn => dryList.filter(fn), remove: () => assert.fail('dry run must not remove') }, removeAndCleanupNode: async () => assert.fail('dry run must not clean up') });
+            let dryClock = Date.now();
+            dryDeps.now = () => dryClock;
+            for (let i = 0; i < 3; i++) { dryClock += 31 * MIN; await dryIdle.vacuum(dryDeps); }
+            assert.strictEqual(dryList.length, 1);
+            assert.ok(messages.some(m => m.includes('vacuum would remove offline worker')));
+        }
 
         // Dry run: logs intentions, touches nothing.
         const dry = await makeProvider({ tapis: { vacuumDryRun: true } });
