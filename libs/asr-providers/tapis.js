@@ -1,15 +1,20 @@
 'use strict';
 
 const axios = require('axios');
+const crypto = require('crypto');
+const path = require('path');
 const config = require('../../config');
 const AbstractASRProvider = require('../classes/AbstractASRProvider');
 const tapisTaskOptions = require('../tapisTaskOptions');
 // Supplements the legacy fallback with options in NodeODX's public schema.
 const nodeodxExtraOptions = require('../nodeodx-extra-options');
 const logger = require('../logger');
+const statusCodes = require('../statusCodes');
 const { extractUserFromToken, describeTokenUser } = require('../tapisIdentity');
 const { cancelTapisJob, isTerminalOutcome } = require('../tapisCancel');
 const TapisJobRegistry = require('../tapisJobRegistry');
+const tapisCheckpoint = require('../tapisCheckpoint');
+const { translateImportPathForNode } = require('../tapisRegistration');
 
 const { STATES } = TapisJobRegistry;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -80,6 +85,11 @@ const PRE_RUN_STATUSES = new Set([
     'SUBMITTING', 'SUBMITTING_JOB', 'QUEUED', 'BLOCKED', 'PAUSED'
 ]);
 const TERMINAL_STATUSES = new Set(['FINISHED', 'CANCELLED', 'FAILED']);
+// Terminal statuses that mean the work did not complete: a task still routed to or
+// waiting for such a job has been lost and must be failed in the task table.
+const FAILED_STATUSES = new Set(['CANCELLED', 'FAILED']);
+const MAX_FAILURE_MESSAGE_LENGTH = 300;
+const RESUME_LOOKUP_TTL_MS = 60 * 1000;
 const DEFAULT_MAX_QUEUE_WAIT_MINUTES = { 'vm-small': 240, normal: 720, default: 480 };
 
 const ACTIVE_STATUSES = new Set([
@@ -119,7 +129,7 @@ const sameUser = (pending, identity) => {
     return ownerMatches && (!normalizedOwnerTenant || normalizedOwnerTenant === normalizedTenant);
 };
 
-const buildWorkerEnvVariables = (configuredEnv, tapisToken, registrationSecret) => {
+const buildWorkerEnvVariables = (configuredEnv, tapisToken, registrationSecret, extraEnvVariables = []) => {
     const envVariables = Array.isArray(configuredEnv) ? configuredEnv : [];
 
     // Current Tapis leaves the historical ${_tapisAccessToken} macro literal.
@@ -132,6 +142,13 @@ const buildWorkerEnvVariables = (configuredEnv, tapisToken, registrationSecret) 
             description: 'Request-scoped Tapis JWT for NodeODX worker authentication'
         });
     if (registrationSecret) result.push({ key: 'NODEODX_REGISTRATION_SECRET', value: registrationSecret });
+    // Per-submission variables (checkpoint resume) cannot replace the credentials above.
+    const reserved = new Set(['TAPIS_ACCESS_TOKEN', '_tapisAccessToken', 'NODEODX_REGISTRATION_SECRET']);
+    for (const variable of Array.isArray(extraEnvVariables) ? extraEnvVariables : []) {
+        if (!variable || !variable.key || reserved.has(variable.key)) continue;
+        const existing = result.findIndex(item => item.key === variable.key);
+        if (existing === -1) result.push(variable); else result[existing] = variable;
+    }
     return result;
 };
 
@@ -222,6 +239,11 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                     pathImport: record.pathImport || null,
                     submissionParams: record.submissionParams || {},
                     token: null,
+                    // A restart mid-restore must still hand the task over by routing, not by upload.
+                    checkpointResume: record.checkpointResume === true,
+                    resumeTaskUuid: record.resumeOf || null,
+                    resumeNewUuid: record.newUuid || null,
+                    resumeClass: record.class || null,
                     nodeUser: record.owner && record.ownerTenant ? `${record.owner}@${record.ownerTenant}` : null,
                     submittedJobs: [{ tapisJobId: record.tapisJobId, jobName: record.jobName }]
                 });
@@ -241,6 +263,281 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     }
 
     getSubmitTimeoutMs() { return Number(this.getConfig('tapis.submitTimeoutMs', 120000)) || 120000; }
+
+    // ---- Checkpoint resume (docs/tapis.md, "Checkpoint resume") ----------------
+
+    isResumeEnabled() { return this.getConfig('tapis.resume.enabled', false) === true; }
+
+    getResumeSyncTimeoutMs() {
+        const seconds = Number(this.getConfig('tapis.resume.syncTimeoutSeconds', 600));
+        return (Number.isFinite(seconds) && seconds >= 0 ? seconds : 600) * 1000;
+    }
+
+    getResumeSyncPollMs() {
+        const seconds = Number(this.getConfig('tapis.resume.syncPollSeconds', 5));
+        return Math.max(1, (Number.isFinite(seconds) && seconds > 0 ? seconds : 5) * 1000);
+    }
+
+    // Host path of the checkpoint root (what ClusterODX reads) and the same
+    // directory as the worker sees it (what the job is told).
+    getCheckpointRoot() { return this.getConfig('tapis.checkpointRoot', '/corral/webodm/media/.nodeodm-checkpoints'); }
+    getCheckpointNodeRoot() { return this.getConfig('tapis.checkpointNodeRoot', '/corral/utexas/BCS26030/webodm/media/.nodeodm-checkpoints'); }
+    getCheckpointIntervalSeconds() { return parseInt(this.getConfig('tapis.checkpointIntervalSeconds', 900), 10) || 900; }
+    getCheckpointRetentionSeconds() { return parseInt(this.getConfig('tapis.checkpointRetentionSeconds', 604800), 10) || 604800; }
+
+    getCheckpointScratchRoots() {
+        const configured = this.getConfig('tapis.checkpointScratchRoots', ['/scratch', '/work']);
+        const roots = Array.isArray(configured) ? configured : String(configured || '').split(/[,:]/);
+        return roots
+            .map(root => String(root || '').trim())
+            .filter(root => root.startsWith('/'))
+            .map(root => path.posix.normalize(root));
+    }
+
+    isAllowedScratchResumePath(rawPath) {
+        if (!rawPath || typeof rawPath !== 'string' || !rawPath.startsWith('/') || rawPath.includes('\0')) return false;
+        const normalized = path.posix.normalize(rawPath);
+        return this.getCheckpointScratchRoots().some(root => {
+            if (!root || root === '/') return false;
+            return normalized === root || normalized.startsWith(`${root.replace(/\/$/, '')}/`);
+        });
+    }
+
+    // Throws unless the token's Tapis user is the one who ran the checkpointed job.
+    // A manifest that names no owner is not checked here; the proxy has already
+    // matched the request token to the task's owner token.
+    assertCheckpointOwner(manifest, token) {
+        const owner = manifest && manifest.tapisJobOwner ? String(manifest.tapisJobOwner).trim().toLowerCase() : '';
+        if (!owner) return;
+        const identity = extractUserFromToken(token);
+        const [ownerUser, ownerTenant] = owner.split('@');
+        const sameUser = identity && String(identity.username).toLowerCase() === ownerUser;
+        const sameTenant = !ownerTenant || (identity && String(identity.tenantId).toLowerCase() === ownerTenant);
+        if (!sameUser || !sameTenant) {
+            throw new tapisCheckpoint.ResumeRefusal(tapisCheckpoint.REASONS.NOT_OWNER,
+                `Checkpoint for task ${manifest.uuid || ''} belongs to ${owner}`);
+        }
+    }
+
+    // Manifest decision for a task, cached per uuid for RESUME_LOOKUP_TTL_MS. The
+    // resume enforces this same cached decision, so what the lookup told the user
+    // is what the resume acts on. The owner check runs on every read, not once.
+    async resolveCheckpoint(taskId, token) {
+        const emptyAnswer = reason => Object.assign(tapisCheckpoint.evaluateManifest(null), { reason });
+        if (!this.isResumeEnabled()) return { answer: emptyAnswer(tapisCheckpoint.REASONS.DISABLED), manifest: null };
+        if (!tapisCheckpoint.isTaskUuid(taskId)) return { answer: emptyAnswer(tapisCheckpoint.REASONS.NO_MANIFEST), manifest: null };
+
+        const cache = this.resumeLookupCache || (this.resumeLookupCache = new Map());
+        let entry = cache.get(taskId);
+        if (!entry || Date.now() - entry.at > RESUME_LOOKUP_TTL_MS) {
+            const { manifest, reason } = await tapisCheckpoint.readManifest(this.getCheckpointRoot(), taskId, logger);
+            const answer = manifest ? tapisCheckpoint.evaluateManifest(manifest) : emptyAnswer(reason);
+            entry = { at: Date.now(), manifest, answer };
+            cache.set(taskId, entry);
+            for (const [key, value] of cache) if (Date.now() - value.at > RESUME_LOOKUP_TTL_MS) cache.delete(key);
+        }
+
+        if (entry.manifest) {
+            try {
+                this.assertCheckpointOwner(entry.manifest, token);
+            } catch (error) {
+                if (!(error instanceof tapisCheckpoint.ResumeRefusal)) throw error;
+                return { answer: emptyAnswer(error.reason), manifest: null };
+            }
+        }
+        return { answer: Object.assign({}, entry.answer), manifest: entry.manifest };
+    }
+
+    // GET /task/<uuid>/resume
+    async lookupResume(taskId, token) {
+        return (await this.resolveCheckpoint(taskId, token)).answer;
+    }
+
+    // Registry records that belong to a task: the original submission and every
+    // earlier resume of it (replace mode reuses the uuid).
+    recordsForTask(taskId) {
+        if (!this.registry) return [];
+        return this.registry.all().filter(record => record.taskId === taskId || record.newUuid === taskId);
+    }
+
+    // Node count a split task originally ran with: the manifest if the worker
+    // recorded it, else the largest count any job for the task was submitted with.
+    originalNodeCount(taskId, manifest) {
+        const fromManifest = Number(manifest && (manifest.nodeCount || manifest.nodesPerJob));
+        if (fromManifest > 0) return fromManifest;
+        return this.recordsForTask(taskId).reduce((best, record) => Math.max(best, Number(record.nodeCount) || 0), 0);
+    }
+
+    normalizeTaskOptions(options) {
+        if (typeof options === 'string') {
+            try { options = JSON.parse(options); } catch (_error) { options = []; }
+        }
+        if (!Array.isArray(options)) return [];
+        return options.filter(option => option && typeof option === 'object' && option.name).map(option => Object.assign({}, option));
+    }
+
+    // Submit a job that restores `taskId` from its checkpoint and re-runs it with
+    // `taskOptions`. With `newVersion` the task runs under a fresh uuid (the
+    // checkpoint is never modified); otherwise it replaces `taskId`. Resolves once
+    // Tapis accepted the job; the worker registers later and the registration
+    // webhook routes the task (libs/tapisRegistration.js completeResumeRegistration).
+    async resumeTaskFromCheckpoint({ taskId, token, taskOptions = [], newVersion = false, resumeClass = null, name = null, imagesCount = null }) {
+        const { ResumeRefusal, REASONS } = tapisCheckpoint;
+        if (!this.isResumeEnabled()) throw new ResumeRefusal(REASONS.DISABLED, 'Checkpoint resume is not enabled');
+        if (!token || token === 'missing') throw new Error('Tapis JWT token must be provided to resume a checkpointed task');
+
+        const { answer, manifest } = await this.resolveCheckpoint(taskId, token);
+        if (!answer.resumable) throw new ResumeRefusal(answer.reason);
+
+        const requestedOptions = this.normalizeTaskOptions(taskOptions);
+        let effectiveClass = null;
+        if (answer.split) {
+            effectiveClass = ['M', 'O'].includes(resumeClass) ? resumeClass : tapisCheckpoint.inferSplitClass(requestedOptions);
+            if (!effectiveClass || !answer.resumableClasses.includes(effectiveClass)) {
+                throw new ResumeRefusal('class_unavailable', effectiveClass
+                    ? `Split task can only be resumed as class ${answer.resumableClasses.join(' or ')}, not ${effectiveClass}`
+                    : 'Split task can only be resumed from rerun-from merge or odm_meshing and later; this change needs a full run');
+            }
+        }
+
+        const records = this.recordsForTask(taskId);
+        const resolvedImagesCount = parseInt(imagesCount || (manifest && manifest.imagesCount) ||
+            records.reduce((best, record) => Math.max(best, Number(record.imagesCount) || 0), 0), 10) || 1;
+
+        // Submodel work needs the original multi-node job; the shared-submodel path
+        // fans out over its nodes.
+        let jobOptions = requestedOptions;
+        if (answer.split) {
+            const original = this.originalNodeCount(taskId, manifest);
+            // Neither the manifest nor the registry may know it (the manifest does not carry
+            // nodeCount yet): then the request's tapis-node is accepted without enforcing.
+            if (original) {
+                const requested = Number(tapisTaskOptions.getTaskOption(requestedOptions, 'tapis-node')) || 0;
+                if (requested && requested < original) {
+                    throw new ResumeRefusal('node_count_too_small', `A split task needs at least its original ${original} node(s); ${requested} requested`);
+                }
+                jobOptions = requestedOptions.filter(option => option.name !== 'tapis-node')
+                    .concat({ name: 'tapis-node', value: `${requested || original}` });
+                if (this.calculateNodeSubmissionPlan(resolvedImagesCount, jobOptions).nodesForJob < original) {
+                    throw new ResumeRefusal('node_count_too_small', `This configuration allows fewer than the original ${original} node(s)`);
+                }
+            }
+        }
+
+        const queue = tapisTaskOptions.getTaskOption(jobOptions, 'tapis-queue') || this.getDefaultQueue(resolvedImagesCount);
+        const resumeOptions = tapisCheckpoint.buildResumeOptions(
+            tapisTaskOptions.applyGpuQueuePolicy(jobOptions, queue),
+            { split: answer.split, resumeClass: effectiveClass }
+        );
+        const stage = tapisCheckpoint.optionValue(resumeOptions, 'rerun-from');
+
+        const target = newVersion ? crypto.randomUUID() : taskId;
+        if (this.findPendingTask(target)) {
+            throw new ResumeRefusal('resume_in_progress', `A resume is already in progress for task ${target}`);
+        }
+
+        const env = tapisCheckpoint.buildResumeEnv({
+            taskId,
+            newUuid: newVersion ? target : null,
+            options: resumeOptions,
+            nodeRoot: this.getCheckpointNodeRoot(),
+            intervalSeconds: this.getCheckpointIntervalSeconds(),
+            retentionSeconds: this.getCheckpointRetentionSeconds(),
+            allowedRoots: this.getCheckpointScratchRoots(),
+            importPath: manifest && manifest.importPath ? translateImportPathForNode(manifest.importPath, null) : null
+        });
+        const jobName = `${this.generateHostname(resolvedImagesCount)}-resume`;
+
+        logger.info(`[TAPIS] resuming task ${taskId}${newVersion ? ` as ${target}` : ''} from checkpoint: ${JSON.stringify({
+            user: describeTokenUser(token), jobName, class: effectiveClass, stage, split: answer.split
+        })}`);
+        // createNode writes the registry record (resumeOf, newUuid, class, stage,
+        // state SUBMITTING) before it asks Tapis for the job.
+        await this.createNode(null, resolvedImagesCount, token, jobName, null, jobOptions, [], null, target, null, {}, env, {
+            resumeOf: taskId, newUuid: newVersion ? target : null, class: effectiveClass, stage
+        });
+        if (!newVersion && this.resumeLookupCache) this.resumeLookupCache.delete(taskId);
+
+        const pending = this.findPendingTask(jobName);
+        return {
+            success: true,
+            uuid: target,
+            resumeOf: taskId,
+            tapisJobId: pending ? pending.tapisJobId : null,
+            jobName,
+            name: name || (manifest && manifest.name) || null,
+            imagesCount: resolvedImagesCount,
+            options: resumeOptions,
+            engineVersion: answer.engineVersion,
+            class: effectiveClass,
+            stage
+        };
+    }
+
+    // Poll the checkpoint manifest until the worker has finished writing it
+    // (synced, write_failed or partial) or the timeout passes. Teardown calls this
+    // so a node is not destroyed while its terminal checkpoint is still copying.
+    async waitForCheckpointSync(taskId, { tapisJobId = null, timeoutMs = this.getResumeSyncTimeoutMs(), pollMs = this.getResumeSyncPollMs() } = {}) {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+            const { manifest } = await tapisCheckpoint.readManifest(this.getCheckpointRoot(), taskId, logger);
+            if (tapisCheckpoint.syncFinished(manifest, tapisJobId)) return { state: manifest.state, timedOut: false };
+            if (Date.now() >= deadline) {
+                logger.warn(`[TAPIS] checkpoint for ${taskId} not synced after ${Math.round(timeoutMs / 1000)}s (state ${manifest ? manifest.state : 'none'}); tearing down anyway`);
+                return { state: manifest ? manifest.state : null, timedOut: true };
+            }
+            await sleep(Math.max(1, Math.min(pollMs, deadline - Date.now())));
+        }
+    }
+
+    // ---- Failure forwarding ---------------------------------------------------
+
+    // Tasks that depend on a Tapis job: the one waiting for its worker and every
+    // task routed to the worker. Read before the vacuum drops the routes.
+    async collectJobTasks(tapisJobId, node, routetable) {
+        const tasks = new Map();
+        const pending = this.findPendingTask(tapisJobId);
+        if (pending && pending.taskId) tasks.set(pending.taskId, pending.token || null);
+        if (node) {
+            const routes = (await routetable.findByNode(node)) || {};
+            for (const [taskId, route] of Object.entries(routes)) tasks.set(taskId, route && route.token || null);
+        }
+        return [...tasks].map(([taskId, token]) => ({ taskId, token }));
+    }
+
+    failureMessage(job) {
+        const status = String((job && job.status) || 'FAILED').toUpperCase();
+        const text = [job && job.remoteOutcome, job && job.lastMessage]
+            .filter(part => typeof part === 'string' && part.trim() !== '')
+            .map(part => part.trim())
+            .join(': ') || `Tapis job ${status}`;
+        return TapisJobRegistry.stripSensitive(text.slice(0, MAX_FAILURE_MESSAGE_LENGTH));
+    }
+
+    // Fail each task in the task table with the reason Tapis gave, so WebODM's
+    // last_error shows (for example) a Slurm time-limit kill, not a lost node.
+    // A task that already ended on the worker is left alone.
+    async failTasks(tasks, message, tasktable) {
+        for (const { taskId, token } of tasks) {
+            try {
+                const existing = await tasktable.lookup(taskId);
+                const info = existing && existing.taskInfo;
+                const code = info && info.status && info.status.code;
+                if ([statusCodes.FAILED, statusCodes.COMPLETED, statusCodes.CANCELED].includes(code)) continue;
+                const taskInfo = Object.assign({
+                    uuid: taskId, name: taskId, dateCreated: Date.now(), progress: 0, processingTime: -1
+                }, info || {}, { status: { code: statusCodes.FAILED, errorMessage: message } });
+                await tasktable.add(taskId, Object.assign({}, existing || {}, {
+                    taskInfo,
+                    output: ((existing && existing.output) || []).concat(message),
+                    abort: null
+                }), token);
+                logger.info(`[TAPIS] task ${taskId} failed because its Tapis job ended: ${message}`);
+            } catch (error) {
+                logger.warn(`[TAPIS] could not fail task ${taskId}: ${error.message}`);
+            }
+        }
+    }
 
     getDriverName() { return 'tapis'; }
     getCreateRetries() { return Number(this.getConfig('createRetries', 3)) || 3; }
@@ -686,6 +983,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         this.vacuumRunning = true;
         const nodes = deps.nodes || require('../nodes');
         const routetable = deps.routetable || require('../routetable');
+        const tasktable = deps.tasktable || require('../tasktable');
         const removeAndCleanupNode = deps.removeAndCleanupNode || (node => require('../netutils').removeAndCleanupNode(node, this));
         const dryRun = this.getConfig('tapis.vacuumDryRun', false) === true;
         const graceMs = (Number(this.getConfig('tapis.registrationGraceMinutes', 20)) || 20) * 60 * 1000;
@@ -812,10 +1110,16 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                     }
                     if (TERMINAL_STATUSES.has(tapisStatus)) {
                         await act(record, `close ${tapisStatus.toLowerCase()} job`, async () => {
+                            const node = nodes.find(n => n.getTapisJobId && n.getTapisJobId() === record.tapisJobId);
+                            // Read who depends on the job before its pending entry and routes go.
+                            const lostTasks = FAILED_STATUSES.has(tapisStatus)
+                                ? await this.collectJobTasks(record.tapisJobId, node, routetable).catch(() => []) : [];
                             this.activeJobs.delete(record.tapisJobId);
                             this.consumePendingTask(record.tapisJobId);
-                            this.recordState(record.jobName, STATES.DONE, { doneReason: tapisStatus.toLowerCase(), tapisStatus });
-                            const node = nodes.find(n => n.getTapisJobId && n.getTapisJobId() === record.tapisJobId);
+                            this.recordState(record.jobName, STATES.DONE, {
+                                doneReason: tapisStatus.toLowerCase(), tapisStatus, remoteOutcome: (job && job.remoteOutcome) || undefined
+                            });
+                            if (lostTasks.length) await this.failTasks(lostTasks, this.failureMessage(job), tasktable);
                             if (node) { await routetable.removeByNode(node); nodes.remove(node); }
                         });
                         continue;
@@ -1027,7 +1331,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         };
     }
 
-    async submitJobWithoutData(token, jobId, imagesCount, taskOptions = [], status = null) {
+    async submitJobWithoutData(token, jobId, imagesCount, taskOptions = [], status = null, extraEnvVariables = []) {
         const plan = this.calculateNodeSubmissionPlan(imagesCount, taskOptions);
         const mapping = plan.jobProps || {};
         const queue = tapisTaskOptions.getTaskOption(taskOptions, 'tapis-queue') || this.getDefaultQueue(imagesCount);
@@ -1051,7 +1355,8 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                 appArgs: this.getConfig('job.appArgs', []),
                 envVariables: buildWorkerEnvVariables(this.getConfig('job.envVariables', []), token,
                     this.getConfig('worker.allowSharedSecretPrimaryRegistration', false) === true
-                        ? config.registration_secret || this.getConfig('worker.registrationSecret', '') : ''),
+                        ? config.registration_secret || this.getConfig('worker.registrationSecret', '') : '',
+                    extraEnvVariables),
                 schedulerOptions: allocation ? [{ arg: `-A ${allocation}`, name: 'TACC Allocation' }] : []
             },
             subscriptions: []
@@ -1150,14 +1455,14 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return { primaryJobId: uuid, submittedJobs: [{ tapisJobId: uuid, jobName: job.name }] };
     }
 
-    async createNode(req, imagesCount, token, hostname, status, taskOptions = [], fileNames = [], tmpPath = null, clusterTaskId = null, pathImport = null, submissionParams = {}) {
+    async createNode(req, imagesCount, token, hostname, status, taskOptions = [], fileNames = [], tmpPath = null, clusterTaskId = null, pathImport = null, submissionParams = {}, extraEnvVariables = [], resume = null) {
         if (!token) throw new Error('Tapis token is required for Tapis-backed task creation');
         if (!this.canHandle(imagesCount)) throw new Error(`Cannot handle ${imagesCount} images.`);
 
         await this.validateToken(token);
         const identity = extractUserFromToken(token);
         // Write-ahead: the task-level fields a restored record needs for handoff.
-        this.recordUpsert({
+        this.recordUpsert(Object.assign({
             jobName: hostname,
             taskId: clusterTaskId || hostname,
             state: STATES.SUBMITTING,
@@ -1170,8 +1475,11 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             tmpPath,
             pathImport,
             submissionParams
-        });
-        const submission = await this.submitJobWithoutData(token, hostname, imagesCount, taskOptions, status);
+        }, resume ? {
+            // Registered before the submit so a restart cannot orphan the resume.
+            checkpointResume: true, resumeOf: resume.resumeOf, newUuid: resume.newUuid, class: resume.class, stage: resume.stage
+        } : {}));
+        const submission = await this.submitJobWithoutData(token, hostname, imagesCount, taskOptions, status, extraEnvVariables);
         if (status && status.aborted) {
             const cancelled = await this.cancelJob(token, submission.primaryJobId);
             if (isTerminalOutcome(cancelled)) {
@@ -1198,6 +1506,14 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             tapisJobOwnerTenant: identity ? identity.tenantId : null,
             submittedJobs: submission.submittedJobs
         };
+        if (resume) {
+            Object.assign(pending, {
+                checkpointResume: true,
+                resumeTaskUuid: resume.resumeOf,
+                resumeNewUuid: resume.newUuid || null,
+                resumeClass: resume.class || null
+            });
+        }
         this.activeJobs.set(submission.primaryJobId, Object.assign(this.activeJobs.get(submission.primaryJobId) || {}, {
             tapisJobId: submission.primaryJobId,
             tapisJobOwner: pending.tapisJobOwner,
@@ -1256,7 +1572,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         return pending;
     }
 
-    async cancelPendingTask(identifier) {
+    async cancelPendingTask(identifier, reason = 'cancelled') {
         const pending = this.findPendingTask(identifier);
         if (!pending) return false;
         // Consume first: once a cancel is requested the task must never be handed
@@ -1267,10 +1583,16 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
             return true;
         }
         this.recordState(pending.tapisJobId, STATES.CANCEL_REQUESTED, { cancelRequestedAt: Date.now() });
-        const cancelled = await this.cancelJob(pending.token, pending.tapisJobId);
+        let cancelled = await this.cancelJob(pending.token, pending.tapisJobId);
+        if (!isTerminalOutcome(cancelled)) {
+            // A job that is already ending (a failed resume's worker exits by itself) can
+            // refuse the cancel; if Tapis says it is terminal there is nothing to retry.
+            const job = await this.getJob(pending.token, pending.tapisJobId).catch(() => null);
+            if (job && TERMINAL_STATUSES.has(String(job.status || '').toUpperCase())) cancelled = { outcome: 'cancelled' };
+        }
         if (isTerminalOutcome(cancelled)) {
             this.activeJobs.delete(pending.tapisJobId);
-            this.recordState(pending.tapisJobId, STATES.DONE, { doneReason: 'cancelled' });
+            this.recordState(pending.tapisJobId, STATES.DONE, { doneReason: reason });
         } else {
             this.parkCancelFailed(pending.tapisJobId, pending.token, cancelled, { jobId: pending.jobId, taskId: pending.taskId });
         }

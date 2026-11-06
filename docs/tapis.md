@@ -482,6 +482,153 @@ with `scancel` on the login node, or with the owner's token:
 `POST https://portals.tapis.io/v3/jobs/<uuid>/cancel`. ClusterODX cannot do this
 itself because it keeps no tokens on disk.
 
+## Checkpoint resume
+
+Re-run a finished task from the checkpoint its `nodeodx-ls6` worker left on Corral,
+instead of from scratch. Off by default (`tapis.resume.enabled: false`); with the
+flag off every route below answers `disabled` and `POST /task/restart` keeps its old
+"Please create a new task" answer. Design:
+`docs/design/2026-11-06-task-versions-and-resumable-reruns.md` (Part B).
+
+### Configuration keys
+
+Under the private Tapis ASR configuration file.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tapis.resume.enabled` | `false` | Master switch |
+| `tapis.resume.syncTimeoutSeconds` | `600` | How long teardown waits for the worker's terminal checkpoint |
+| `tapis.resume.syncPollSeconds` | `5` | Manifest poll interval during that wait |
+| `tapis.checkpointRoot` | `/corral/webodm/media/.nodeodm-checkpoints` | Checkpoint root as ClusterODX reads it (host path) |
+| `tapis.checkpointNodeRoot` | `/corral/utexas/BCS26030/webodm/media/.nodeodm-checkpoints` | The same directory as the worker sees it |
+| `tapis.checkpointScratchRoots` | `["/scratch", "/work"]` | Passed to the worker as `NODEODM_RESUME_ALLOWED_ROOTS` |
+| `tapis.checkpointIntervalSeconds` | `900` | Passed as `NODEODM_CHECKPOINT_INTERVAL_SECONDS` |
+| `tapis.checkpointRetentionSeconds` | `604800` | Passed as `NODEODM_CHECKPOINT_RETENTION_SECONDS` |
+
+ClusterODX reads `<checkpointRoot>/<uuid>/manifest.json` as its own user; the root
+and manifests must be world- or group-readable. It never writes the checkpoint.
+
+### Routes
+
+All three need the token that owns the task: the route table's token while a worker
+holds the task, else the task-table entry's. Anything else gets the usual
+`Invalid route … no task found for this token` error. Errors are `{"error": "<text>"}`
+with the reason code in the text.
+
+**`GET /task/<uuid>/resume`** answers from the manifest (cached 60 s per uuid; the
+resume enforces the cached decision):
+
+```
+{ resumable, reason, expiresAt, engineVersion, stagesCompleted,
+  checkpointBytes, split, resumableClasses, schemaVersion }
+```
+
+`expiresAt` is epoch milliseconds (the worker writes epoch seconds; seconds, milliseconds and ISO text are all accepted and normalised).
+`reason` is `null` when resumable, else one of `no_manifest`, `legacy_manifest`
+(schema below 2 or a required field missing), `partial` (any state other than
+`synced`, or `dataComplete` false), `write_failed`, `expired`, `optimize_disk_space`,
+`inconsistent`, `no_data` (state `manifest_only`: copying was off), `disabled`, `not_owner`, or `not_tapis` (another ASR provider).
+`resumable` is true only for `state == synced && dataComplete && not expired &&
+!optimizeDiskSpace`. The worker re-checks engine version, image digest and stage
+prerequisites at restore and reports `resumeFallbackReason`; the lookup does not
+know the worker image. `resumableClasses` is `[]` for a non-split task, `["M","O"]`
+for a split task whose manifest says every submodel kept its point cloud
+(the boolean `submodelCloudsPresent`, else all values of the `submodelClouds` map), and `["M"]` otherwise (with `classReason:
+"submodel_clouds_missing"`).
+
+**`POST /task/resume`** with `{uuid, options, newVersion, resumeClass?, imagesCount?}`.
+`options` is the task option list (array of `{name, value}`) as an array or a JSON
+string; `tapis-queue`, `tapis-max-run-time`, `tapis-node` and `tapis-allocation` in it
+shape the job as for any task. With `newVersion` the task runs under a new uuid
+(`crypto.randomUUID()`, the checkpoint is never modified); otherwise it replaces
+`uuid`. Answers `{uuid: <target>, resumedFromStage, resumeMode: "resume",
+checkpointEngineVersion, checkpointUuid: <source uuid>}` as soon as Tapis accepted the
+job. Refused (text carries the code) when the lookup says not resumable, the task still
+has a live worker (`task_active`), a resume of that target is pending
+(`resume_in_progress`), or the class/node-count rules below fail.
+
+Split tasks are re-run by class. The class is the `resumeClass` field (`"M"` or
+`"O"`) when present; otherwise it is inferred from the `rerun-from` option: `merge`
+is M, `odm_meshing` or any later stage (`mvs_texturing`, `odm_georeferencing`,
+`odm_dem`, `odm_orthophoto`, `odm_report`, `odm_postprocess`) is O, and an earlier
+stage or none is refused (`class_unavailable`; the change needs a full run). The same
+inference applies to `POST /task/restart`. A class missing from `resumableClasses` is
+refused with `class_unavailable` too. Non-split checkpoints pass the options through
+unchanged. Class M runs the primary with `rerun-from merge`; class O adds
+the internal `submodel-rerun-from odm_meshing`. Any caller-supplied value for those two
+options is replaced. A split resume needs the original node count (manifest
+`nodeCount`, else the largest `nodeCount` in the job registry for the task); fewer
+is refused (`node_count_too_small`), an absent `tapis-node` defaults to the original,
+and when neither the manifest nor the registry knows the original, the requested
+`tapis-node` is accepted without enforcing it.
+
+**`POST /task/restart`** on a task with no worker: when the lookup says resumable it
+resumes in place (no new uuid) and answers `{success: true, resumed: true}`; otherwise
+(including flag off) the legacy "Please create a new task" error.
+
+### Worker environment
+
+Added to the job for every resume (the usual credentials and configured
+`job.envVariables` are unchanged and cannot be overridden):
+
+| Variable | Value |
+|---|---|
+| `NODEODM_CHECKPOINT_ROOT` | `tapis.checkpointNodeRoot` |
+| `NODEODM_CHECKPOINT_INTERVAL_SECONDS` / `_RETENTION_SECONDS` | config |
+| `NODEODM_RESUME_TASK_UUID` | source uuid |
+| `NODEODM_RESUME_AS_UUID` | new uuid, only with `newVersion` |
+| `NODEODM_RESUME_CHECKPOINT_PATH` | `<nodeRoot>/<source uuid>` |
+| `NODEODM_RESUME_OPTIONS_JSON` | the options above, without `tapis-*` |
+| `NODEODM_RESUME_ALLOW_COLD_START` | `0` always |
+| `NODEODM_RESUME_ALLOWED_ROOTS` | `tapis.checkpointScratchRoots` joined by `:` |
+| `NODEODM_RESUME_IMPORT_PATH` | only when the manifest records `importPath` (path-mapped) |
+
+### Flow
+
+1. The route checks ownership, then `resumeTaskFromCheckpoint` validates the cached
+   lookup, builds options and environment, and calls `createNode`, which writes the
+   registry record `{resumeOf, newUuid, class, stage, state: submitting, checkpointResume}`
+   **before** the Tapis submit.
+2. ClusterODX replaces the task-table entry for the target uuid with `QUEUED`,
+   output `Restoring checkpoint…`. Cancelling the task meanwhile cancels the pending
+   job through the Tapis API (never `scancel`).
+3. The worker registers. A registration for a resume job carries `checkpointResume`,
+   `resumeTaskUuid`, `resumeMode`, `resumeFallbackReason` and `schemaVersion`.
+   - No fallback reason: the route for the target uuid is added, **then** the task-table
+     entry is deleted. No upload happens.
+   - A `resumeFallbackReason` (the worker sends `resumeMode: "failed"`, then exits by itself, so a cancel Tapis refuses because the job is ending is treated as done), or a worker that does not acknowledge the resume at all
+     (`resume_not_acknowledged`, e.g. an old image): the task is marked `FAILED` in the
+     task table with `errorMessage: "Resume failed: <reason>"`, the registry records
+     `resumeFailure`, the job is cancelled via Tapis and nothing is handed off. The
+     registration is answered `200 {resumeFailed: true, terminate: true, reason}`.
+   After a ClusterODX restart a restored pending resume still hands off by routing.
+4. **Teardown waits.** `onCommit` snapshots the task into the task table immediately,
+   then, for a worker that registered with `schemaVersion >= 2` while
+   `tapis.resume.enabled`, polls the manifest until its state is `synced`,
+   `write_failed` or `partial` or `syncTimeoutSeconds` passes, and only then destroys
+   the node. A manifest naming a different `writerJobUuid` than the worker's Tapis job
+   (a stale checkpoint from the earlier run of an in-place resume) does not count.
+
+### Failure forwarding
+
+When the vacuum finds that the Tapis job behind a task ended `FAILED` or `CANCELLED`
+(for example a Slurm time-limit kill) it fetches the job record and fails each task
+routed to that worker, or still waiting for it, in the task table: `status.code`
+`FAILED` and `status.errorMessage` = `<remoteOutcome>: <lastMessage>` (300 characters
+at most, token-like strings redacted). WebODM's `last_error` then shows the real reason
+instead of a lost node. A task already `COMPLETED`/`FAILED`/`CANCELED` in the table
+is left alone. `remoteOutcome` is also stored in the registry record. Only the
+vacuum sees this, so the message appears within `tapis.vacuumIntervalSeconds`.
+
+### Known limits
+
+- The task-table entry is in memory; after a ClusterODX restart a queued resume has
+  no entry until its worker registers.
+- A task whose route and task-table entry are both gone (task table entries expire
+  after two days) cannot be looked up or resumed, though the checkpoint lives
+  seven days.
+- Uploaded `images/` stay in the checkpoint in this release.
+
 ## Split-merge coordinator behind nginx
 
 Set `--public-address https://clusterodm.tacc.utexas.edu` when starting the

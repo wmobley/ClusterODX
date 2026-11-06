@@ -159,6 +159,59 @@ module.exports = {
             req.url = url.format({ query, pathname });
         };
 
+        // ---- Checkpoint resume (docs/tapis.md) -------------------------------------
+        const resumeProvider = () => {
+            const provider = asrProvider.get();
+            return provider && typeof provider.resumeTaskFromCheckpoint === 'function' &&
+                provider.isResumeEnabled() ? provider : null;
+        };
+
+        // Only the token that owns a task may look up or resume it: the route's token
+        // while a worker holds it, else the task-table entry's.
+        const ownsTask = async (taskId, token) => {
+            if (!token) return false;
+            const owner = (await routetable.lookupToken(taskId)) || (await tasktable.lookupToken(taskId));
+            return !!owner && owner === token;
+        };
+
+        const asBool = value => value === true || value === 'true' || value === '1' || value === 1;
+
+        // Submit the resume job, then replace the task-table entry for the target uuid
+        // with QUEUED so WebODM polls a task that exists while the job waits in the
+        // queue. Cancelling it meanwhile cancels the pending Tapis job.
+        const startResume = async (provider, { uuid, token, fields, newVersion }) => {
+            const previous = await tasktable.lookup(uuid);
+            const previousInfo = previous && previous.taskInfo || {};
+            const result = await provider.resumeTaskFromCheckpoint({
+                taskId: uuid,
+                token,
+                taskOptions: fields.options,
+                newVersion,
+                resumeClass: fields.resumeClass || fields.resume_class || null,
+                imagesCount: fields.imagesCount || null,
+                name: previousInfo.name || null
+            });
+            await tasktable.add(result.uuid, {
+                taskInfo: {
+                    uuid: result.uuid,
+                    name: result.name || `resume_${result.uuid}`,
+                    dateCreated: Date.now(),
+                    imagesCount: result.imagesCount,
+                    options: result.options,
+                    progress: 0,
+                    status: { code: statusCodes.QUEUED }
+                },
+                output: ['Restoring checkpoint…'],
+                checkpointResume: true,
+                abort: () => {
+                    Promise.resolve()
+                        .then(() => provider.destroyMachine(result.jobName))
+                        .catch(e => logger.warn(`Could not cancel resume job ${result.jobName}: ${e.message || e}`));
+                }
+            }, token);
+            return result;
+        };
+
         const proxy = new HttpProxy();
         const optionsCache = new ValueCache({expires: 60 * 60 * 1000});
         const pathHandlers = {
@@ -497,9 +550,10 @@ module.exports = {
                             return;
                         }
                     }, { saveFilesToDir: tmpPath, limits });
-                }else if (req.method === 'POST' && ['/task/restart', '/task/cancel', '/task/remove'].indexOf(pathname) !== -1){
-                    // Lookup task id from body
+                }else if (req.method === 'POST' && ['/task/restart', '/task/cancel', '/task/remove', '/task/resume'].indexOf(pathname) !== -1){
+                    // Lookup task id (and, for resume, the other fields) from body
                     let taskId = null;
+                    let fields = {};
                     let body = await getReqBody(req);
 
                     try {
@@ -507,14 +561,14 @@ module.exports = {
                         if (contentType === 'application/json') {
                             const payload = JSON.parse(body);
                             taskId = payload && payload.uuid;
+                            if (payload && typeof payload === 'object') fields = payload;
                         } else {
                             taskId = await new Promise((resolve, reject) => {
                                 const busboy = new Busboy({ headers: req.headers });
-                                let uuid = null;
                                 busboy.on('field', (fieldname, value) => {
-                                    if (fieldname === 'uuid') uuid = value;
+                                    fields[fieldname] = value;
                                 });
-                                busboy.on('finish', () => resolve(uuid));
+                                busboy.on('finish', () => resolve(fields.uuid === undefined ? null : fields.uuid));
                                 busboy.on('error', reject);
                                 utils.stringToStream(body).on('error', reject).pipe(busboy);
                             });
@@ -524,7 +578,34 @@ module.exports = {
                         res.end(JSON.stringify({ error: 'Invalid task control request body' }));
                         return;
                     }
-                    if (typeof taskId === 'string' && taskId){
+                    if (typeof taskId === 'string' && taskId && pathname === '/task/resume'){
+                        // POST /task/resume {uuid, options, newVersion, resumeClass?}: re-run a
+                        // finished task from its checkpoint, in place or as a new version.
+                        const provider = resumeProvider();
+                        if (!provider){
+                            json(res, { error: 'Checkpoint resume is not enabled (disabled)' });
+                        }else if (!(await ownsTask(taskId, query.token))){
+                            json(res, { error: `Invalid route for taskId ${taskId}, no task found for this token (not_owner).` });
+                        }else if (await routetable.lookupNode(taskId)){
+                            json(res, { error: `Task ${taskId} is still active on a worker; resume it after it has finished (task_active).` });
+                        }else if (await maxConcurrencyLimitReached(limits.maxConcurrentTasks, query.token)){
+                            json(res, { error: 'Reached maximum number of concurrent tasks. Please wait until other tasks have finished (concurrency_limit).' });
+                        }else{
+                            try{
+                                const result = await startResume(provider, { uuid: taskId, token: query.token, fields, newVersion: asBool(fields.newVersion) });
+                                json(res, {
+                                    uuid: result.uuid,
+                                    resumedFromStage: result.stage || null,
+                                    resumeMode: 'resume',
+                                    checkpointEngineVersion: result.engineVersion === undefined ? null : result.engineVersion,
+                                    checkpointUuid: taskId
+                                });
+                            }catch(e){
+                                logger.warn(`Cannot resume task ${taskId}: ${e.message}`);
+                                json(res, { error: e.reason ? e.message : `Resume failed: ${e.message}` });
+                            }
+                        }
+                    }else if (typeof taskId === 'string' && taskId){
                         concurrencyMonitor.decreaseCount(query.token);
 
                         let node = await routetable.lookupNode(taskId);
@@ -557,7 +638,25 @@ module.exports = {
 
                                     json(res, { success: true });
                                 }else{
-                                    json(res, { error: `Action not supported. Please create a new task.` });
+                                    // A node-less task with a resumable checkpoint restarts by
+                                    // resuming in place; anything else keeps the legacy answer.
+                                    const provider = resumeProvider();
+                                    let resumed = false;
+                                    if (provider && await ownsTask(taskId, query.token)){
+                                        const answer = await provider.lookupResume(taskId, query.token);
+                                        if (answer.resumable){
+                                            try{
+                                                await startResume(provider, { uuid: taskId, token: query.token, fields, newVersion: false });
+                                                resumed = true;
+                                                json(res, { success: true, resumed: true });
+                                            }catch(e){
+                                                logger.warn(`Cannot resume task ${taskId}: ${e.message}`);
+                                                json(res, { error: e.reason ? e.message : `Resume failed: ${e.message}` });
+                                                resumed = true;
+                                            }
+                                        }
+                                    }
+                                    if (!resumed) json(res, { error: `Action not supported. Please create a new task.` });
                                 }
                             }else{
                                 json(res, { error: `Invalid route for taskId ${taskId}, no nodes in routing table.`});
@@ -586,12 +685,20 @@ module.exports = {
                         const taskId = matches[1];
                         const action = matches[2];
 
-                        // Special case for /task/<uuid>/download/<asset> if 
-                        // we need to redirect to S3. In that case, we rewrite
-                        // the URL to fetch from S3.
-                        const downloadsPath = asrProvider.downloadsPath();
-                        const node = await routetable.lookupNode(taskId);
-
+                        // GET: /task/<uuid>/resume — can this finished task be re-run from its
+                        // checkpoint? Only the token that owns the task may ask.
+                        if (req.method === 'GET' && action === 'resume'){
+                            if (!(await ownsTask(taskId, query.token))){
+                                json(res, { error: `Invalid route for taskId ${taskId}:${action}, no task found for this token.` });
+                                return;
+                            }
+                            const provider = asrProvider.get();
+                            json(res, provider && typeof provider.lookupResume === 'function'
+                                ? await provider.lookupResume(taskId, query.token)
+                                : { resumable: false, reason: 'not_tapis', expiresAt: null, engineVersion: null, stagesCompleted: [],
+                                    checkpointBytes: null, split: false, resumableClasses: [], schemaVersion: null });
+                            return;
+                        }
                         // GET: /task/<uuid>/tapis — which Tapis job runs (or ran) this task.
                         // Answered from the live worker while it is routed, else from the
                         // job registry (kept tapis.registryRetentionDays after the job closes).
@@ -607,7 +714,8 @@ module.exports = {
                             const provider = asrProvider.get();
                             const registry = provider && provider.registry && typeof provider.registry.get === 'function' ? provider.registry : null;
                             const record = registry ? registry.get(taskId) : null;
-                            const liveJobId = node && typeof node.getTapisJobId === 'function' ? node.getTapisJobId() : null;
+                            const liveNode = await routetable.lookupNode(taskId);
+                            const liveJobId = liveNode && typeof liveNode.getTapisJobId === 'function' ? liveNode.getTapisJobId() : null;
                             json(res, {
                                 uuid: taskId,
                                 tapisJobId: liveJobId || (record && record.tapisJobId) || null,
@@ -620,6 +728,12 @@ module.exports = {
                             });
                             return;
                         }
+                        // Special case for /task/<uuid>/download/<asset> if 
+                        // we need to redirect to S3. In that case, we rewrite
+                        // the URL to fetch from S3.
+                        const downloadsPath = asrProvider.downloadsPath();
+                        const node = await routetable.lookupNode(taskId);
+
                         const isDownloadAction = action.indexOf('download/') === 0;
                         const asrInstance = asrProvider.get();
                         const asrDriver = asrInstance && typeof asrInstance.getDriverName === 'function'
