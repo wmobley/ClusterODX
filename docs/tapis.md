@@ -506,3 +506,20 @@ The ordinary image-only `import_path` API is unchanged. V1 removes HTTP image
 uploads, not shared-filesystem copying or result downloads. Existing pending
 submission descriptors preserve the optional fields for handoff compatibility;
 process-local pending tasks still do not survive a restart.
+
+## Which Tapis job ran a task
+
+`GET /task/<uuid>/tapis?token=<task owner token>` returns the Tapis job behind a
+ClusterODX task, so a client (WebODM's run records) can store the job id for
+provenance and look the rest up in Tapis later:
+
+```json
+{"uuid": "<task uuid>", "tapisJobId": "<Tapis job uuid>", "jobName": "<ClusterODX job name>",
+ "state": "registered", "queue": "normal", "nodeCount": 2, "maxMinutes": 360, "submittedAt": 1700000000000}
+```
+
+While the worker is still routed the id comes from the node; afterwards it comes from
+the job registry, which keeps closed records for `tapis.registryRetentionDays` (default
+7). Only the token that created the task is answered; any other token, or an unknown
+task, gets an `error` object. Fields are `null` when unknown.
+

@@ -591,6 +591,35 @@ module.exports = {
                         // the URL to fetch from S3.
                         const downloadsPath = asrProvider.downloadsPath();
                         const node = await routetable.lookupNode(taskId);
+
+                        // GET: /task/<uuid>/tapis — which Tapis job runs (or ran) this task.
+                        // Answered from the live worker while it is routed, else from the
+                        // job registry (kept tapis.registryRetentionDays after the job closes).
+                        // Only the token that owns the task may ask. Lets WebODM keep the
+                        // Tapis job id with its run record for provenance.
+                        if (req.method === 'GET' && action === 'tapis'){
+                            const taskEntry = await tasktable.lookup(taskId);
+                            const ownerToken = (await routetable.lookupToken(taskId)) || (taskEntry && taskEntry.token) || null;
+                            if (!ownerToken || ownerToken !== query.token){
+                                json(res, { error: `Invalid route for taskId ${taskId}:${action}, no task found for this token.` });
+                                return;
+                            }
+                            const provider = asrProvider.get();
+                            const registry = provider && provider.registry && typeof provider.registry.get === 'function' ? provider.registry : null;
+                            const record = registry ? registry.get(taskId) : null;
+                            const liveJobId = node && typeof node.getTapisJobId === 'function' ? node.getTapisJobId() : null;
+                            json(res, {
+                                uuid: taskId,
+                                tapisJobId: liveJobId || (record && record.tapisJobId) || null,
+                                jobName: (record && record.jobName) || null,
+                                state: (record && record.state) || null,
+                                queue: (record && record.queue) || null,
+                                nodeCount: (record && record.nodeCount) || null,
+                                maxMinutes: (record && record.maxMinutes) || null,
+                                submittedAt: (record && record.submittedAt) || null
+                            });
+                            return;
+                        }
                         const isDownloadAction = action.indexOf('download/') === 0;
                         const asrInstance = asrProvider.get();
                         const asrDriver = asrInstance && typeof asrInstance.getDriverName === 'function'
