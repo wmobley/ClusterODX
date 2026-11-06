@@ -85,7 +85,18 @@ module.exports = {
                 }catch(e){
                     logger.warn(`Cannot add task table entry for ${taskId} from ${node}`);
                 }
-                
+
+                // A resume-capable worker (registered with checkpoint schema >= 2) is still
+                // copying its terminal checkpoint; destroying it now would leave a partial one.
+                if (typeof asrProvider.waitForCheckpointSync === 'function' && asrProvider.isResumeEnabled() &&
+                    Number(node.nodeData && node.nodeData.schemaVersion) >= 2){
+                    try{
+                        await asrProvider.waitForCheckpointSync(taskId, { tapisJobId: node.getTapisJobId() });
+                    }catch(e){
+                        logger.warn(`Checkpoint wait for ${taskId} failed: ${e.message}`);
+                    }
+                }
+
                 this.cleanup(taskId, cleanupDelay);
             }
         }

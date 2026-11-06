@@ -27,7 +27,7 @@ const tasktable = require("./libs/tasktable");
 const routetable = require("./libs/routetable");
 const { listTasks } = require("./libs/adminTasks");
 const utils = require("./libs/utils");
-const { extractBearerToken, normalizeRegistration } = require("./libs/tapisRegistration");
+const { completeResumeRegistration, extractBearerToken, normalizeRegistration } = require("./libs/tapisRegistration");
 const { submitPendingTask } = require("./libs/tapisWorker");
 const { classifySubmitError, logHandoffEvent, safeNodeEndpoint } = require("./libs/observability");
 const { SplatError } = require("./libs/splatAuth");
@@ -462,10 +462,41 @@ module.exports = {
       try {
         nodeWasAdded = !nodeExisted;
         await nodes.saveToDisk();
-        await submitPendingTask(pending, node);
+        if (pending.checkpointResume) {
+          // The worker already holds the task (restored from its checkpoint): route it
+          // instead of uploading. A failed restore cancels the job and fails the task.
+          const outcome = await completeResumeRegistration({ pending, node, registration, provider, routetable, tasktable });
+          if (outcome.mode === 'failed') {
+            if (nodeWasAdded) {
+              nodes.remove(node);
+              await nodes.saveToDisk();
+            }
+            logHandoffEvent(logger, "webhook_completed", Object.assign(registrationFields(), {
+              task_id: pending.taskId,
+              tapis_job_id: pending.tapisJobId,
+              outcome: "resume_failed"
+            }));
+            return res.json({
+              success: true,
+              message: "Checkpoint resume failed; the job was cancelled",
+              resumeFailed: true,
+              reason: outcome.reason,
+              terminate: true,
+              tapisJobUuid: pending.tapisJobId,
+              taskUuid: pending.taskId,
+              authMethod
+            });
+          }
+        } else {
+          if (registration.checkpointResume) {
+            logger.warn(`Worker for Tapis job ${pending.tapisJobId} reported a checkpoint resume but task ${pending.taskId} was not submitted as one; handing off normally`);
+          }
+          await submitPendingTask(pending, node);
+          taskSubmitted = true;
+          await routetable.add(pending.taskId, node, pending.token);
+          await tasktable.delete(pending.taskId);
+        }
         taskSubmitted = true;
-        await routetable.add(pending.taskId, node, pending.token);
-        await tasktable.delete(pending.taskId);
         provider.consumePendingTask(pending.taskId);
         if (typeof provider.markRegistered === 'function') provider.markRegistered(pending.tapisJobId, node);
         if (pending.tmpPath) utils.rmdir(pending.tmpPath);

@@ -60,6 +60,12 @@ module.exports = {
         delete(tasks[taskId]);
     },
 
+    // Owner token of an entry; unlike lookup() this does not extend its retention.
+    lookupToken: async function(taskId){
+        const entry = tasks[taskId];
+        return entry ? entry.token : null;
+    },
+
     lookup: async function(taskId){
         const entry = tasks[taskId];
         if (entry){

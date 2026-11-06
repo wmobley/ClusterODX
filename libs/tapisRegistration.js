@@ -2,6 +2,8 @@
 
 const path = require('path');
 const config = require('../config');
+const logger = require('./logger');
+const statusCodes = require('./statusCodes');
 
 const FALLBACK_SHARED_PATH_MAPPINGS = {
     '*': {
@@ -32,6 +34,12 @@ const normalizeRegistration = (payload = {}) => {
         tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null,
         nodeReady: !!payload.nodeReady,
         role: typeof payload.role === 'string' ? payload.role : null,
+        // Checkpoint resume: the worker says it restored a checkpoint (or why it could not).
+        checkpointResume: payload.checkpointResume === true,
+        resumeTaskUuid: typeof payload.resumeTaskUuid === 'string' ? payload.resumeTaskUuid : null,
+        resumeMode: typeof payload.resumeMode === 'string' ? payload.resumeMode : null,
+        resumeFallbackReason: typeof payload.resumeFallbackReason === 'string' && payload.resumeFallbackReason.trim() !== ''
+            ? payload.resumeFallbackReason.trim().slice(0, 200) : null,
         metadata: {
             childIndex: payload.childIndex !== undefined ? payload.childIndex : null,
             role: payload.role || null,
@@ -41,7 +49,10 @@ const normalizeRegistration = (payload = {}) => {
             jobCount: payload.jobCount !== undefined ? payload.jobCount : null,
             replicasPerJob: payload.replicasPerJob !== undefined ? payload.replicasPerJob : null,
             registrationUuid: typeof payload.registrationUuid === 'string' ? payload.registrationUuid : null,
-            tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null
+            tapisJobUuid: typeof payload.tapisJobUuid === 'string' ? payload.tapisJobUuid : null,
+            // Worker checkpoint schema; >= 2 means teardown can wait for a synced checkpoint.
+            schemaVersion: Number.isInteger(Number(payload.schemaVersion)) && payload.schemaVersion !== null && payload.schemaVersion !== ''
+                ? Number(payload.schemaVersion) : null
         }
     };
 };
@@ -83,7 +94,53 @@ const translateImportPathForNode = (importPath, nodeHostname) => {
     return path.normalize(importPath);
 };
 
+// Registration of a worker that was started to resume a checkpoint. There is no
+// upload: the worker already holds the task, so the job is only wired in.
+//
+// Success: add the route for the target uuid, THEN delete its task-table entry, so
+// a poll between the two steps finds the route (or the old entry), never nothing.
+// Failure (the worker reports a fallback reason, or does not acknowledge the
+// resume at all, as an old worker image would): fail the task in the task table
+// with "Resume failed: <reason>", record it in the registry and cancel the job
+// through the Tapis API. Nothing is handed off. Never cold-starts.
+//
+// Returns { mode: 'resumed' } or { mode: 'failed', reason }. Throws only when the
+// success path cannot be completed (the caller answers 502 so the worker retries).
+const completeResumeRegistration = async ({ pending, node, registration, provider, routetable, tasktable }) => {
+    const target = pending.taskId;
+    const reason = registration.resumeFallbackReason ||
+        (registration.checkpointResume ? null : 'resume_not_acknowledged');
+
+    if (!reason) {
+        if (!pending.token) throw new Error(`No owner token to route resumed task ${target}`);
+        await routetable.add(target, node, pending.token);
+        await tasktable.delete(target);
+        logger.info(`Routed checkpoint-resumed task ${target} to ${node.hostname()}:${node.port()} (mode ${registration.resumeMode || 'unspecified'})`);
+        return { mode: 'resumed' };
+    }
+
+    const message = `Resume failed: ${reason}`;
+    const existing = await tasktable.lookup(target);
+    const info = existing && existing.taskInfo || {};
+    await tasktable.add(target, Object.assign({}, existing || {}, {
+        taskInfo: Object.assign({ uuid: target, name: target, dateCreated: Date.now(), progress: 0, processingTime: -1 }, info,
+            { status: { code: statusCodes.FAILED, errorMessage: message } }),
+        output: ((existing && existing.output) || []).concat(message),
+        abort: null
+    }), pending.token || null);
+    provider.recordUpsert({ jobName: pending.jobId, resumeFailure: reason });
+    logger.warn(`Checkpoint resume of task ${target} failed on its worker: ${reason}; cancelling job ${pending.tapisJobId}`);
+    try {
+        await provider.cancelPendingTask(pending.tapisJobId, `resume failed: ${reason}`);
+    } catch (error) {
+        // The task is already failed; a cancel that errors must not undo the answer.
+        logger.warn(`Cancel of job ${pending.tapisJobId} after failed resume errored: ${error.message}`);
+    }
+    return { mode: 'failed', reason };
+};
+
 module.exports = {
+    completeResumeRegistration,
     extractBearerToken,
     normalizeRegistration,
     translateImportPathForNode
