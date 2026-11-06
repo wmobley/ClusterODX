@@ -300,6 +300,30 @@ const makeJwt = (username, tenant = 'tacc') => {
     assert.strictEqual(shapePayload.execSystemLogicalQueue, 'gpu-a100-small');
     assert.strictEqual(shapePayload.coresPerNode, 16);
 
+    // shapeOnly entries supply a queue's shape but are never default tiers.
+    const shapeOnlyProvider = new TapisProvider({
+        system: { executionSystemId: 'sys', archiveSystemId: 'arc', logicalQueue: 'vm-small' },
+        imageSizeMapping: [
+            { maxImages: 200, logicalQueue: 'vm-small', coresPerNode: 16, memoryMB: 30720 },
+            { maxImages: 1000, logicalQueue: 'normal', coresPerNode: 64, memoryMB: 30720 },
+            { logicalQueue: 'development', coresPerNode: 128, memoryMB: 256000, shapeOnly: true }
+        ]
+    });
+    assert.strictEqual(shapeOnlyProvider.getJobPropertiesFor(150).logicalQueue, 'vm-small');
+    assert.strictEqual(shapeOnlyProvider.getJobPropertiesFor(500).logicalQueue, 'normal');
+    assert.strictEqual(shapeOnlyProvider.canHandle(1500), false);
+    assert.deepStrictEqual(shapeOnlyProvider.buildDefaultByImages('queue').map(entry => entry.value), ['vm-small', 'normal']);
+    assert.strictEqual(shapeOnlyProvider.getJobShapeForQueue('development').coresPerNode, 128);
+    assert.strictEqual(shapeOnlyProvider.getJobShapeForQueue('development').memoryMB, 256000);
+    assert.strictEqual(shapeOnlyProvider.getJobShapeForQueue('vm-small').coresPerNode, 16);
+    await assert.rejects(
+        new TapisProvider({
+            system: { executionSystemId: 'sys', archiveSystemId: 'arc' },
+            imageSizeMapping: [{ coresPerNode: 128, memoryMB: 256000, shapeOnly: true }]
+        }).initialize(),
+        /shapeOnly entries require logicalQueue/
+    );
+
     console.log('TAPIS PROVIDER TEST PASSED');
 })().catch(error => {
     console.error(error.stack || error);

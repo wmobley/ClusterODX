@@ -98,10 +98,22 @@ downloads require the worker and its task assets to remain available.
       "coresPerNode": 64,
       "memoryMB": 30720,
       "maxJobTime": "06:00:00"
+    },
+    {
+      "logicalQueue": "development",
+      "coresPerNode": 128,
+      "memoryMB": 256000,
+      "shapeOnly": true
     }
   ]
 }
 ```
+
+An entry with `"shapeOnly": true` only supplies `coresPerNode` and `memoryMB` for
+an explicitly requested queue (`tapis-queue`). It needs `logicalQueue`, does not
+need `maxImages`, and never becomes a default tier: it is ignored by the
+image-count defaults, `canHandle`, and the `defaultByImages` published to WebODM.
+The queue must also be listed in `system.queueFilter` for WebODM to offer it.
 
 The provider accepts these task options:
 

@@ -161,6 +161,11 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
         ]);
         const mappings = this.getConfig('imageSizeMapping', []);
         if (!Array.isArray(mappings)) throw new Error('Invalid config key imageSizeMapping (array expected)');
+        for (const mapping of mappings) {
+            if (mapping && mapping.shapeOnly === true && !mapping.logicalQueue) {
+                throw new Error('Invalid config key imageSizeMapping (shapeOnly entries require logicalQueue)');
+            }
+        }
         mappings.sort((a, b) => Number(a.maxImages || 0) - Number(b.maxImages || 0));
 
         const registryPath = this.getConfig('tapis.registryPath', 'data/tapis-jobs.json');
@@ -246,11 +251,12 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     getDownloadsBaseUrl() { return `${this.getConfig('tapis.baseUrl')}/v3/files`; }
 
     getJobPropertiesFor(imagesCount) {
-        return (this.getConfig('imageSizeMapping', []) || []).find(mapping => Number(mapping.maxImages) >= imagesCount) || null;
+        return (this.getConfig('imageSizeMapping', []) || []).find(mapping => mapping.shapeOnly !== true && Number(mapping.maxImages) >= imagesCount) || null;
     }
 
     canHandle(imagesCount) { return this.getJobPropertiesFor(imagesCount) !== null; }
 
+    // shapeOnly entries (never default tiers) are returned here too.
     // The imageSizeMapping tier whose logicalQueue is `queue`, if any. Used so that a
     // caller who overrides tapis-queue gets a job shaped for that queue (cores/memory)
     // instead of the shape of the image-count tier, which may not fit the queue at all
@@ -276,6 +282,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
     getImageSizeDefaultMappings() {
         return (this.getConfig('imageSizeMapping', []) || [])
             .map(mapping => {
+                if (mapping && mapping.shapeOnly === true) return null;
                 const maxImages = Number(mapping && mapping.maxImages);
                 if (!Number.isFinite(maxImages) || maxImages <= 0) return null;
 
