@@ -12,7 +12,7 @@ const {cancelTapisJob,isTerminalOutcome} = require('./tapisCancel');
 const defaults = {
     enabled:false, profileId:'nodesplat-v1', instanceId:'', storeDir:'data/splat-tasks',
     maxConcurrentRuns:1, maxLogBytes:52428800, maxPageLines:500, maxPageBytes:262144,
-    maxResultBytes:8*1024*1024*1024, grantMaxAgeSeconds:300, workerLeaseSeconds:86400,
+    maxResultBytes:8*1024*1024*1024, grantMaxAgeSeconds:300, workerLeaseSeconds:86400, retentionDays:7,
     grantKeys:{}, profile:{}
 };
 // Operator-facing log lines. Never pass tokens, secrets or request bodies here.
@@ -209,6 +209,34 @@ class SplatTasks {
             return {success:true,uuid:r.uuid};
         });
     }
+    // A record is finished with once it is terminal, or its worker lease ran out (the Tapis job's wall limit is
+    // inside the lease, so nothing can still be running or reporting). Anything else must be cancelled first.
+    removable(r,now=Date.now()) { return TERMINAL.has(r.state) || !(r.lease_expires_at>now); }
+    async removeRecord(uuid) {
+        const r=this.store.get(uuid);
+        if(!r) fail(404,'not_found','Training attempt was not found.');
+        return this.serialize(uuid,async()=>{
+            if(!this.removable(r)) fail(409,'not_removable','Training attempt is still active; cancel it first.');
+            this.sessions.delete(uuid);
+            this.store.delete(uuid);
+            log('info',`removed record ${uuid} run=${r.run_id} owner=${r.owner&&r.owner.username} state=${r.state}`);
+            return {success:true,uuid};
+        });
+    }
+    // Drop removable records that have been idle for retentionDays. Artifacts under outputRoot are left alone.
+    vacuum(now=Date.now()) {
+        if(!this.store) return 0;
+        const cutoff=now-(Number(this.config.retentionDays)||7)*86400000;
+        let removed=0;
+        for(const r of this.store.all()) {
+            const touched=Date.parse(r.updated_at)||0;
+            if(!this.removable(r,now) || touched>cutoff || this.operations.has(r.uuid)) continue;
+            this.sessions.delete(r.uuid);
+            try { this.store.delete(r.uuid); removed++; log('info',`vacuum removed record ${r.uuid} run=${r.run_id} state=${r.state}`); }
+            catch(error) { log('warn',`vacuum could not remove ${r.uuid}: ${error.message}`); }
+        }
+        return removed;
+    }
     // Read-only admin view of NodeSplat workers. Never returns the worker token, grant or API hashes, or settings.
     adminList() {
         const registered=r=>Boolean(r.worker_url) && this.sessions.has(r.uuid);
@@ -222,6 +250,7 @@ class SplatTasks {
             worker:r.worker_url?r.worker_url.replace(/^http:\/\//,'').replace(/\/$/,''):null,
             registered:registered(r),
             lastHeartbeat:r.last_heartbeat||null,
+            removable:this.removable(r),
             updatedAt:r.updated_at||null
         })).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));
     }

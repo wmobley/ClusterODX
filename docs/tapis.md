@@ -452,6 +452,17 @@ when registration fails; a companion change must make it exit on 410 and bound
 its retries. Until then, cancelling the job from ClusterODX is what stops the
 worker.
 
+### NodeSplat records
+
+NodeSplat runs are kept in their own store (`splat.storeDir`, default
+`data/splat-tasks`), not in the node list, so the vacuum above never sees them.
+A record is *removable* when its state is `ready`, `failed` or `canceled`, or its
+worker lease (`splat.workerLeaseSeconds`) has expired. The admin page shows a
+Delete button on removable rows, backed by `DELETE /r/splat` with `{"uuid": ...}`
+(404 unknown record, 409 still active). Removable records untouched for
+`splat.retentionDays` (default 7) are deleted automatically every 10 minutes and
+at startup. Output files under the output root are never deleted.
+
 ### Configuration keys
 
 All under the private Tapis ASR configuration file.

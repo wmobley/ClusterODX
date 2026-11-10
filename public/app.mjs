@@ -6,7 +6,7 @@ import { SplatList } from "./component/splatList.mjs";
 import { Header } from "./component/header.mjs";
 import { RefreshButton } from "./component/refreshButton.mjs";
 import { AddInstanceButton } from "./component/addInstanceButton.mjs";
-import { clearAdminToken, getFetch } from "./common.fetch.js";
+import { clearAdminToken, getFetch, deleteFetch } from "./common.fetch.js";
 import { getStartupToken, validateAdminToken, cancelAdminValidation } from "./authToken.mjs";
 
 const getInfoData = async () => {
@@ -140,6 +140,15 @@ export default function App() {
     setTaskLoading(false);
   }, []);
 
+  const removeSplat = useCallback(async (worker) => {
+    if (!window.confirm(`Delete NodeSplat record ${worker.runId ?? worker.uuid}? Output files are kept.`)) return;
+    try {
+      const response = await deleteFetch("/r/splat", { body: { uuid: worker.uuid } });
+      if (!response.ok) window.alert(((await response.json().catch(() => ({}))).error) || "Unable to delete record");
+    } catch (error) { console.error(error); }
+    loadDashboard();
+  }, [loadDashboard]);
+
   const resetDashboard = useCallback(() => {
     session.current.active = false;
     session.current.generation++;
@@ -199,7 +208,7 @@ export default function App() {
       <div><span class="text-muted">Assigned to workers</span><strong>${tasks.filter(task => task.state === "assigned").length}</strong></div>
     </div>
     <${NodeList} nodes=${nodes} getData=${loadDashboard} />
-    <${SplatList} workers=${splats} />
+    <${SplatList} workers=${splats} onRemove=${removeSplat} />
     <div id="btn-area">
       <${AddInstanceButton} getNodes=${loadDashboard} />
       <div style="flex-grow:1"></div>
