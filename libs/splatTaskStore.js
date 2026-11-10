@@ -48,6 +48,15 @@ class SplatTaskStore {
         this.records.set(record.uuid, record);
         return record;
     }
+    delete(id) {
+        if (!UUID.test(id)) throw new Error('Invalid task UUID');
+        // Unlink first: a record that is only forgotten in memory would reappear after a restart.
+        try { fs.unlinkSync(path.join(this.directory, `${id}.json`)); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        const dir = fs.openSync(this.directory, 'r');
+        try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+        return this.records.delete(id);
+    }
     close() {
         if (this.lockFd === undefined) return;
         fs.closeSync(this.lockFd);

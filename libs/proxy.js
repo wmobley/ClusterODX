@@ -48,6 +48,11 @@ module.exports = {
         const splatTasks = new (require('./splatTasks').SplatTasks)(config.splat, {sharedPathMappings: config.node_shared_path_mappings});
         module.exports.splatTasks = splatTasks;
         require('./splatInstance').instance = splatTasks;
+        if (splatTasks.store) {
+            const sweep = () => { try { splatTasks.vacuum(); } catch (e) { logger.warn(`NodeSplat vacuum failed: ${e.message}`); } };
+            setInterval(sweep, 1000 * 60 * 10).unref();
+            sweep();
+        }
 
         setInterval(() => {
             utils.cleanupTemporaryDirectory(config.stale_uploads_timeout);

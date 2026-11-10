@@ -9,7 +9,7 @@ const badgeClass = state => ({
 
 const timestamp = value => (typeof value === "string" ? Date.parse(value) : value);
 
-export const SplatList = ({ workers = [] }) => html`<section class="dashboard-panel mt-4" aria-label="NodeSplat workers">
+export const SplatList = ({ workers = [], onRemove }) => html`<section class="dashboard-panel mt-4" aria-label="NodeSplat workers">
   <h4>NodeSplat Workers <span class="badge bg-light text-dark">${workers.length}</span></h4>
   <p class="text-muted small">
     GPU training workers started per run. They are tracked separately from NodeODX nodes and never receive ODM tasks.
@@ -18,7 +18,7 @@ export const SplatList = ({ workers = [] }) => html`<section class="dashboard-pa
   ${workers.length > 0 && html`<div class="table-responsive"><table class="table table-hover table-striped">
     <thead>
       <tr class="table-primary">
-        <th>Run</th><th>Owner</th><th>State</th><th>Registered</th><th>Worker</th><th>Tapis job</th><th>Last seen</th>
+        <th>Run</th><th>Owner</th><th>State</th><th>Registered</th><th>Worker</th><th>Tapis job</th><th>Last seen</th><th></th>
       </tr>
     </thead>
     <tbody>

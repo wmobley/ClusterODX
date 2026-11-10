@@ -771,6 +771,17 @@ module.exports = {
       res.json(splatTasks ? splatTasks.adminList() : []);
     });
 
+    app.delete("/r/splat", async (req, res) => {
+      const splatTasks = require("./libs/splatInstance").instance;
+      if (!splatTasks || !splatTasks.store) return res.status(404).json({ error: "NodeSplat is not enabled" });
+      try {
+        res.json(await splatTasks.removeRecord(req.body && req.body.uuid));
+      } catch (error) {
+        const status = error instanceof SplatError ? error.status : 500;
+        res.status(status).json({ error: status === 500 ? "Unable to remove record" : error.message });
+      }
+    });
+
     app.get("/r/task/list", async (_req, res) => {
       res.set('Cache-Control', 'no-store');
       try {
