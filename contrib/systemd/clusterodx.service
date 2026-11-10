@@ -1,0 +1,25 @@
+# systemd unit that starts ClusterODX (Tapis) at boot and restarts it on failure.
+# Install and edit User, Group and the paths for your host: see docs/systemd.md.
+[Unit]
+Description=ClusterODX (Tapis)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+# --tmp-dir must be mounted before ClusterODX starts.
+RequiresMountsFor=/corral/clusterodm/tmp
+
+[Service]
+Type=simple
+User=wmobley
+Group=PT2050-DataX
+WorkingDirectory=/home/wmobley/ODM-SUITE/ClusterODX
+ExecStart=/usr/bin/node index.js \
+  --asr tapis-config.json --config clusterodx-config.json \
+  --splat-config splat-config.json \
+  --port 3000 --admin-cli-port 8080 --admin-web-port 10000 \
+  --allow-local-download-bypass true --tmp-dir /corral/clusterodm/tmp
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

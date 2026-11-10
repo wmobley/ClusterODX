@@ -77,6 +77,9 @@ Or with apptainer, after cd into ClusterODX directory:
 apptainer run docker://webodm/clusterodx [parameters]
 ```
 
+To start ClusterODX at boot and restart it on failure, see
+[docs/systemd.md](docs/systemd.md).
+
 Then connect to the CLI and connect new [NodeODX](https://github.com/WebODM/NodeODX) instances:
 
 ```bash
