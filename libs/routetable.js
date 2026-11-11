@@ -72,6 +72,15 @@ module.exports = {
         return null;
     },
 
+    // Remove a single route. Deletion is synchronous; callers that batch several
+    // removals pass { persist: false } and call saveToDisk once.
+    remove: async function(taskId, { persist = true } = {}){
+        if (!routes || !Object.prototype.hasOwnProperty.call(routes, taskId)) return false;
+        delete(routes[taskId]);
+        if (persist) await this.saveToDisk();
+        return true;
+    },
+
     removeByNode: async function(node){
         if (!node) return;
 

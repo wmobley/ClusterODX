@@ -18,6 +18,7 @@
 const Node = require('./classes/Node');
 const fs = require('fs');
 const logger = require('./logger');
+const { nodeOwnedBy } = require('./tapisIdentity');
 
 let nodes = [];
 let initialized = false;
@@ -132,7 +133,11 @@ module.exports = {
         nodes.forEach(n => n.turn = 0);
     },
 
-    findBestAvailableNode: async function(numImages, update = false){
+    // `owner` restricts selection to nodes launched by that Tapis identity
+    // (see nodeOwnedBy). Pass undefined for no restriction; pass null when
+    // ownership applies but the submitter's identity is unknown, which matches
+    // no node so the caller falls back to starting a job for them.
+    findBestAvailableNode: async function(numImages, update = false, owner = undefined){
         if (update) await this.updateInfo();
 
         let maxTurnNumber = this.maxTurnNumber();
@@ -144,6 +149,7 @@ module.exports = {
         const candidates = nodes.filter(n => n.isOnline() && 
                                              !n.isLocked() &&
                                              !n.isAutoSpawned() &&
+                                            (owner === undefined || nodeOwnedBy(n.nodeData, owner)) &&
                                             (!n.getInfo().maxImages || n.getInfo().maxImages >= numImages));
         if (!candidates.length) return null;
 

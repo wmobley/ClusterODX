@@ -159,5 +159,6 @@ class TapisJobRegistry {
 TapisJobRegistry.STATES = STATES;
 TapisJobRegistry.OPEN_STATES = OPEN_STATES;
 TapisJobRegistry.stripSensitive = stripSensitive;
+TapisJobRegistry.SENSITIVE_VALUE_PATTERN = SENSITIVE_VALUE_PATTERN;
 
 module.exports = TapisJobRegistry;

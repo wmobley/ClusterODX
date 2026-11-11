@@ -27,6 +27,7 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
     workers.forEach(worker => { worker.taskInfo = async () => accepted ? {uuid: TASK_ID, status: {code: statusCodes.RUNNING}} : {error: 'not found'}; worker.taskCancel = async uuid => { cancellations.push(uuid); return {success: true}; }; });
     workers.forEach(worker => { worker.isOnline = () => true; worker.nodeData.tapisJobUuid = crossAllocation ? 'other-job' : 'source-job'; worker.nodeData.info.capabilities = {shared_submodel_v1: capable}; });
     let selected = 0;
+    const selectionArgs = [];
     let rejected = false;
     let response;
 
@@ -57,7 +58,7 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
         './nodes': {
             updateInfo: async () => {},
             filter: predicate => workers.filter(predicate),
-            findBestAvailableNode: async () => workers[switchWorker ? Math.min(selected++, 1) : 0]
+            findBestAvailableNode: async (...args) => { selectionArgs.push(args); return workers[switchWorker ? Math.min(selected++, 1) : 0]; }
         },
         './asrProvider': {
             get: () => ({ getDriverName: () => 'tapis' }),
@@ -119,7 +120,7 @@ function fixture({ rejectStage = null, switchWorker = false, fileCount = 0, path
             clearTimeout(timer);
         }
     };
-    return { run, requests, records, routes, cleanups, cancellations, output, workers, response: () => response };
+    return { run, selectionArgs, requests, records, routes, cleanups, cancellations, output, workers, response: () => response };
 }
 
 const field = (request, name) => request.fields.find(part => part.name === name)?.contents;
@@ -127,6 +128,8 @@ const field = (request, name) => request.fields.find(part => part.name === name)
 async function main() {
     const shared = fixture();
     await shared.run();
+    // Tapis mode restricts selection to the submitter's own nodes; an unreadable token (null) matches none.
+    assert.deepStrictEqual(shared.selectionArgs[0], [0, true, null], 'selection must carry the submitting user');
     assert.deepStrictEqual(shared.requests.map(request => request.stage), ['init', 'commit']);
     const init = shared.requests[0];
     assert.strictEqual(field(init, 'import_path'), '/worker-a/shared/project/9/task/images');

@@ -52,7 +52,8 @@ const routetable = require('./libs/routetable');
                 password: config.admin_pass,
                 useTapisJwt: config.admin_web_use_tapis_jwt,
                 allowedTenants: config.admin_web_allowed_tenants,
-                allowedUsers: config.admin_web_allowed_users
+                allowedUsers: config.admin_web_allowed_users,
+                taskStaleHours: config.admin_task_stale_hours
             });
         } catch (error){
             logger.error(`Unable to start admin web interface on port ${config.admin_web_port}: ${error && error.code === 'EADDRINUSE' ? 'address already in use' : (error && error.message ? error.message : error)}`);

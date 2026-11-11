@@ -9,6 +9,7 @@
     "admin-web-use-tapis-jwt": true,
     "admin-web-allowed-tenants": "",
     "admin-web-allowed-users": "",
+    "admin-task-stale-hours": 6,
     "cloud-provider": "local",
     "downloads-from-s3": "",
     "splitmerge": true,

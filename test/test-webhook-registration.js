@@ -274,6 +274,40 @@ const makeJwt = (username, tenant = 'portals') => {
             const badBearer = await request(port, '/webhook/register-node', {method: 'POST',
                 headers: {authorization: 'Bearer invalid-token'}, body: payload});
             assert.strictEqual(badBearer.status, 401, 'invalid bearer does not fall back');
+
+            // An admin removes the task while the worker is still being handed its upload:
+            // registration must not create a ghost route or mark the job registered.
+            const raceAllocation = { ...allocation, taskId: 'race-task', tapisJobId: 'race-job' };
+            let removedMidUpload = false;
+            let routedGhost = false;
+            let markedRegistered = false;
+            let workerCleanup = 0;
+            const raceWorker = http.createServer((req, res) => {
+                req.resume();
+                if (req.url.startsWith('/task/new')) removedMidUpload = true; // the admin's cancel lands during the upload
+                if (req.url.startsWith('/task/remove')) workerCleanup++;
+                res.writeHead(200, {'content-type': 'application/json'});
+                res.end(JSON.stringify({uuid: 'race-task', success: true}));
+            });
+            await new Promise(resolve => raceWorker.listen(0, '127.0.0.1', resolve));
+            provider.findPendingTask = id => !removedMidUpload && ['race-job', 'race-task'].includes(id) ? raceAllocation : null;
+            provider.findRegistrationJob = id => id === 'race-job' ? raceAllocation : null;
+            provider.markRegistered = () => { markedRegistered = true; };
+            routetable.add = async () => { routedGhost = true; };
+            claimed = false;
+            try {
+                const raced = await register({ ...payload, port: raceWorker.address().port, tapisJobUuid: 'race-job' });
+                assert.strictEqual(raced.status, 409, raced.body);
+                assert.match(JSON.parse(raced.body).error, /removed during registration/);
+                assert.strictEqual(routedGhost, false, 'no route may be added for a removed task');
+                assert.strictEqual(markedRegistered, false);
+                assert.strictEqual(claimed, false, 'claim released');
+                assert.strictEqual(workerCleanup, 1, 'worker is told to drop the removed task');
+            } finally {
+                nodes.remove(nodes.find(n => n.hostname() === '127.0.0.1' && n.port() === raceWorker.address().port));
+                await new Promise(resolve => raceWorker.close(resolve));
+                delete provider.markRegistered;
+            }
         } finally {
             routetable.add = originalAdd;
             tasktable.delete = originalDelete;

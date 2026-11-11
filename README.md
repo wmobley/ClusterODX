@@ -43,7 +43,11 @@ restrict which Tapis identities may sign in.
 The admin dashboard lists tracked tasks as well as registered nodes. Submitted
 Tapis tasks appear while waiting for worker registration; routed tasks show their
 worker assignment. Use Refresh or enable five-second auto-refresh to update both
-lists. Assignment describes the local route, not processing progress. Pending
+lists. The Tasks table shows each task's owner, age and an advisory Stale flag, can be
+filtered, and lets administrators remove selected tasks (after a dry-run preview, with an
+option to also stop idle auto-spawned workers), and "Open node" opens a worker's own page with its token. These actions require
+`admin-web-allowed-tenants` or `admin-web-allowed-users` to be set; see `docs/tapis.md`
+("Admin task visibility"). Assignment describes the local route, not processing progress. Pending
 task records are in memory and do not survive a ClusterODX restart.
 
 The dashboard includes counts of registered/online nodes, tracked tasks, and

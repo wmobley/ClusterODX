@@ -28,7 +28,7 @@ const nodes = require('./nodes');
 const odmOptions = require('./odmOptions');
 const statusCodes = require('./statusCodes');
 const asrProvider = require('./asrProvider');
-const { describeTokenUser } = require('./tapisIdentity');
+const { describeTokenUser, extractUserFromToken } = require('./tapisIdentity');
 const logger = require('./logger');
 const events = require('events');
 const sharedSubmodel = require('./sharedSubmodel');
@@ -319,12 +319,15 @@ module.exports = {
 
         const sharedSource = await sharedSubmodel.authorize(params, token, uuid);
         if (sharedSource && !config.splitmerge) throw new Error('Cannot use this node as a split-merge cluster.');
-        let node = sharedSource ? await sharedSubmodel.select(sharedSource) : await nodes.findBestAvailableNode(imagesCount, true);
+        const provider = asrProvider.get();
+        const tapisAutoscale = provider && provider.getDriverName && provider.getDriverName() === 'tapis';
+        // With Tapis, a user only runs on nodes launched by their own jobs. An
+        // unreadable token matches no node, so the task starts a job instead.
+        const nodeOwner = tapisAutoscale ? extractUserFromToken(token) : undefined;
+        let node = sharedSource ? await sharedSubmodel.select(sharedSource) : await nodes.findBestAvailableNode(imagesCount, true, nodeOwner);
         if (sharedSource && !node) throw new Error('No capable workers available in the parent allocation');
         
         // Do we need to / can we create a new node via autoscaling?
-        const provider = asrProvider.get();
-        const tapisAutoscale = provider && provider.getDriverName && provider.getDriverName() === 'tapis';
         const autoscale = !sharedSource && (!node || node.availableSlots() === 0) &&
                             asrProvider.isAllowedToCreateNewNodes() &&
                             asrProvider.canHandle(fileNames.length || imagesCount);
@@ -580,7 +583,7 @@ module.exports = {
                         // If autoscale is enabled, simply retry on same node
                         // otherwise switch to another node
                         if (!autoscale){
-                            const newNode = sharedSource ? await sharedSubmodel.select(sharedSource) : await nodes.findBestAvailableNode(imagesCount, true);
+                            const newNode = sharedSource ? await sharedSubmodel.select(sharedSource) : await nodes.findBestAvailableNode(imagesCount, true, nodeOwner);
                             if (sharedSource && !newNode) throw new Error('No capable workers available in the parent allocation');
                             if (newNode){
                                 node = newNode;
@@ -626,6 +629,9 @@ module.exports = {
             try{
                 await doUpload();
                 eventEmitter.emit('close');
+
+                // An admin or the user may have removed the task mid-upload; do not leave a ghost route.
+                if (status.aborted) return;
 
                 await routetable.add(uuid, node, token);
                 await tasktable.delete(uuid);

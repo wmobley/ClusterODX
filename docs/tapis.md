@@ -249,6 +249,15 @@ identities. The administrative CLI remains protected by `admin-pass`. Set
 `admin-web-use-tapis-jwt: false` to use that password for the web interface as
 well. State-changing cross-origin requests are rejected.
 
+## Worker ownership and routing
+
+With the Tapis provider a task runs only on workers launched by the submitting user's own
+Tapis jobs: the node's recorded `tapisJobOwner` and `tapisJobOwnerTenant` must match the
+`user@tenant` in the task's token (case-insensitive; both must be recorded, so a worker with
+no recorded owner serves nobody). When the user has no usable worker ClusterODX starts a
+Tapis job for them, as it does for an empty pool. Shared-submodel splits stay inside their
+parent's job. Other providers keep the previous any-node behaviour.
+
 ## Admin task visibility
 
 Authenticated administrators can use `GET /r/task/list` on the admin web service
@@ -259,6 +268,47 @@ of summaries with `uuid`, `name`, `source`, `state`, `statusCode`, `imagesCount`
 Dates are epoch milliseconds; unavailable metadata is null and missing names use
 the UUID. Credentials, processing options, filesystem paths, and console output
 are excluded. Responses use `Cache-Control: no-store`.
+
+Rows also carry `owner` (`user@tenant`, or null when unknown), `stale`, and
+`staleReason`, and the `node` object gains `online` and `autoSpawned`. The owner is
+decoded in-process from the stored token, else taken from the pending record or the
+worker's recorded Tapis job owner; it is advisory and never used for authorization.
+`stale` is also advisory: a routed task is stale only when its worker is offline
+(`worker_offline`), a pending task when it has been silent longer than
+`admin-task-stale-hours` (default 6, `inactive`), and finished tasks are never stale.
+A job legitimately waiting in a long queue will show as stale.
+
+### Removing tasks and opening a node
+
+These write routes sit behind the same JWT or Basic authentication, send
+`Cache-Control: no-store`, and log denied attempts without credentials.
+
+- **Fail closed.** In JWT mode they answer `403` unless at least one of
+  `admin-web-allowed-tenants` / `admin-web-allowed-users` is set (a startup warning is logged
+  when neither is). In Basic mode they require `Sec-Fetch-Site: same-origin` or a same-host
+  `Origin`, because browsers attach Basic credentials automatically.
+- `POST /r/task/remove` with `{"uuids": [...], "stopWorker": false, "dryRun": false}`
+  (1 to 25 ids matching `^[A-Za-z0-9_-]{1,64}$`; `application/json` only). Only one removal
+  runs at a time (`409` otherwise). For each id, in order: cancel a pending Tapis job that
+  belongs to exactly that task id (never a job name or Tapis job UUID) via the lifecycle
+  `cancelPendingTask`; take the tasktable record, abort an in-flight upload and delete
+  `tmp/<id>`; tell the worker to remove the task and delete the route. With `stopWorker`, each
+  distinct idle auto-spawned worker (at most 10 per request) is then locked, re-checked with
+  the same busy test the lifecycle vacuum uses (queue, routes, in-flight reservations), and
+  destroyed through `destroyNode`; anything busy is skipped. `dryRun` reports what would happen
+  and changes nothing. The response is
+  `{dryRun, persist, results: [{uuid, outcome, owner, steps}]}` where `outcome` is `removed`,
+  `not_found` or `failed`, and a worker that is unreachable is reported in `steps.workerRemove`
+  while the route is still removed. Cancelling needs the owner's token, which is in memory only:
+  after a ClusterODX restart a stopped worker reports `unreachable` and is left to the vacuum or
+  an operator. Every task writes one `[ADMIN] task remove` audit line (admin, owner, outcome,
+  steps; no names, tokens or worker output).
+- If a worker registers for a task that was removed during its upload, the webhook now answers
+  `409 {"error": "Task was removed during registration"}` and adds no route.
+- `POST /r/node/open` with `{"number": N}` returns `{"url": "http(s)://host:port/?token=..."}` for the
+  node's own web UI. The worker token appears only in this response to an authenticated admin;
+  it is not in `/r/node/list` or logs. The page opens the URL in a new tab, so the token is in
+  that tab's address bar, history and the worker's access log.
 
 The task table updates at login, on Refresh, and with the optional five-second
 auto-refresh. `submitting` means a local running task has no accepted Tapis UUID

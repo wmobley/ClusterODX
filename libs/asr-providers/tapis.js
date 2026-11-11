@@ -15,6 +15,7 @@ const { cancelTapisJob, isTerminalOutcome } = require('../tapisCancel');
 const TapisJobRegistry = require('../tapisJobRegistry');
 const tapisCheckpoint = require('../tapisCheckpoint');
 const { translateImportPathForNode } = require('../tapisRegistration');
+const { isNodeBusy } = require('../nodeBusy');
 
 const { STATES } = TapisJobRegistry;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -1149,7 +1150,7 @@ module.exports = class TapisAsrProvider extends AbstractASRProvider {
                         }
                         if (node.isOnline()) {
                             const routes = await routetable.findByNode(node);
-                            const busy = node.getInfoProperty('taskQueueCount', 0) > 0 || (routes && Object.keys(routes).length > 0) || node.transients > 0;
+                            const busy = isNodeBusy(node, routes ? Object.keys(routes).length : 0);
                             if (busy) {
                                 if (record.idleTicks) this.recordUpsert({ jobName: record.jobName, idleTicks: 0, idleSince: null });
                                 continue;

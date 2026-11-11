@@ -31,4 +31,31 @@ const describeTokenUser = token => {
     return identity ? identity.fullUser : 'unknown';
 };
 
-module.exports = { extractUserFromToken, describeTokenUser };
+// True when the Tapis job that launched a node belongs to `identity`. Both the
+// owner and the tenant must be recorded on the node and match; a node with no
+// recorded owner belongs to nobody, so ownership can never be bypassed by
+// omission. `identity` is the result of extractUserFromToken (or null).
+const nodeOwnedBy = (nodeData, identity) => {
+    if (!nodeData || !identity) return false;
+    const owner = String(nodeData.tapisJobOwner || '').trim().toLowerCase();
+    const ownerTenant = String(nodeData.tapisJobOwnerTenant || '').trim().toLowerCase();
+    if (!owner || !ownerTenant) return false;
+    const username = String(identity.username || '').trim().toLowerCase();
+    const tenantId = String(identity.tenantId || '').trim().toLowerCase();
+    if (!username || !tenantId) return false;
+    const ownerMatches = owner.includes('@') ? owner === `${username}@${tenantId}` : owner === username;
+    return ownerMatches && ownerTenant === tenantId;
+};
+
+// Advisory "user@tenant" label for display: the token claims win, then an
+// explicit { owner, tenant } record, else null. Never used for authorization.
+const ownerLabel = (token, fallback = null) => {
+    const identity = extractUserFromToken(token);
+    if (identity) return identity.fullUser;
+    const owner = fallback && typeof fallback.owner === 'string' ? fallback.owner.trim() : '';
+    if (!owner) return null;
+    const tenant = fallback && typeof fallback.tenant === 'string' ? fallback.tenant.trim() : '';
+    return owner.includes('@') || !tenant ? owner : `${owner}@${tenant}`;
+};
+
+module.exports = { extractUserFromToken, describeTokenUser, nodeOwnedBy, ownerLabel };

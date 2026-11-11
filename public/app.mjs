@@ -6,7 +6,7 @@ import { SplatList } from "./component/splatList.mjs";
 import { Header } from "./component/header.mjs";
 import { RefreshButton } from "./component/refreshButton.mjs";
 import { AddInstanceButton } from "./component/addInstanceButton.mjs";
-import { clearAdminToken, getFetch, deleteFetch } from "./common.fetch.js";
+import { clearAdminToken, getFetch, postFetch, deleteFetch } from "./common.fetch.js";
 import { getStartupToken, validateAdminToken, cancelAdminValidation } from "./authToken.mjs";
 
 const getInfoData = async () => {
@@ -19,6 +19,15 @@ const getNodesData = async () => {
   if (!res.ok) throw new Error("Unable to load ClusterODX nodes");
   return await res.json();
 };
+// POST a removal request; surface the server's reason (for example the allowlist rule) as an Error.
+const postRemoval = async (url, body) => {
+  const response = await postFetch(url, { body });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+  return result;
+};
+const removeTasks = (uuids, { dryRun, stopWorker }) => postRemoval("/r/task/remove", { uuids, dryRun, stopWorker });
+
 const Login = ({ onAuthenticated }) => {
   const [token, setToken] = useState("");
   const [error, setError] = useState("");
@@ -205,6 +214,7 @@ export default function App() {
       <div><span class="text-muted">Online nodes</span><strong>${nodes.filter(node => node.isOnline).length}</strong></div>
       <div><span class="text-muted">NodeSplat workers</span><strong>${splats.filter(worker => worker.registered).length}</strong></div>
       <div><span class="text-muted">Tracked tasks</span><strong>${tasks.length}</strong></div>
+      <div><span class="text-muted">Stale tasks</span><strong>${tasks.filter(task => task.stale).length}</strong></div>
       <div><span class="text-muted">Assigned to workers</span><strong>${tasks.filter(task => task.state === "assigned").length}</strong></div>
     </div>
     <${NodeList} nodes=${nodes} getData=${loadDashboard} />
@@ -215,6 +225,6 @@ export default function App() {
       <button class="btn btn-outline-primary mx-2" onClick=${loadDashboard}>Refresh</button>
       <${RefreshButton} autoRefresh=${autoRefresh} setAutoRefresh=${setAutoRefresh} />
     </div>
-    <${TaskList} tasks=${tasks} loading=${taskLoading} error=${taskError} />
+    <${TaskList} tasks=${tasks} loading=${taskLoading} error=${taskError} onRemove=${removeTasks} onChanged=${loadDashboard} />
   </div>`;
 }

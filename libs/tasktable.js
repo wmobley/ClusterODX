@@ -16,6 +16,7 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 const logger = require('./logger');
+const { ownerLabel } = require('./tapisIdentity');
 
 let tasks = null;
 
@@ -66,6 +67,15 @@ module.exports = {
         return entry ? entry.token : null;
     },
 
+    // Admin removal: delete synchronously and hand back the entry object without
+    // bumping `accessed` or leaving a window for a concurrent lookup.
+    take: async function(taskId){
+        if (!tasks || !Object.prototype.hasOwnProperty.call(tasks, taskId)) return null;
+        const entry = tasks[taskId];
+        delete(tasks[taskId]);
+        return entry.obj;
+    },
+
     lookup: async function(taskId){
         const entry = tasks[taskId];
         if (entry){
@@ -87,7 +97,8 @@ module.exports = {
                 statusCode: number(info.status && info.status.code),
                 imagesCount: number(info.imagesCount),
                 dateCreated: number(info.dateCreated),
-                accessed: number(entry.accessed)
+                accessed: number(entry.accessed),
+                owner: ownerLabel(entry.token)
             };
         });
     },

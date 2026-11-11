@@ -3,6 +3,7 @@ import { useState } from "../lib/hooks.module.js";
 import { html } from "../lib/preact.html.mjs";
 import { DeleteInstanceDialog } from "./dialog.mjs";
 export const NodeList = ({ nodes = [], getData = () => {} }) => {
+  const [openError, setOpenError] = useState("");
   const LockBtn = ({ isLock, number }) =>
     isLock
       ? html`<button class="btn btn-sm btn-outline-secondary mx-1" onClick=${(e) => doUnLock(number)}>
@@ -35,6 +36,25 @@ export const NodeList = ({ nodes = [], getData = () => {} }) => {
         }}
       />
     </div>`;
+  };
+
+  // The worker token is fetched on demand from an authenticated admin endpoint and is
+  // never part of the node list. A blank tab is opened first so the click is not blocked.
+  const openNode = async (number) => {
+    const popup = window.open("about:blank", "_blank");
+    try {
+      const response = await postFetch("/r/node/open", { body: { number } });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || typeof result.url !== "string") throw new Error(result.error || "Unable to open node");
+      if (popup) {
+        popup.opener = null;
+        popup.location.href = result.url;
+      } else window.open(result.url, "_blank", "noopener,noreferrer");
+      setOpenError("");
+    } catch (error) {
+      if (popup) popup.close();
+      setOpenError(error.message || "Unable to open node");
+    }
   };
 
   const doLock = (number) => {
@@ -77,6 +97,7 @@ export const NodeList = ({ nodes = [], getData = () => {} }) => {
   };
   return html`<section class="dashboard-panel" aria-label="Nodes">
     <h4>Registered NodeODX Nodes <span class="badge bg-light text-dark">${nodes.length}</span></h4>
+    ${openError && html`<div class="alert alert-danger" role="alert">${openError}</div>`}
     ${!nodes.length && html`<p class="text-muted">No registered nodes.</p>`}
     <div class="table-responsive"><table class="table table-hover table-striped">
     <thead>
@@ -112,7 +133,7 @@ export const NodeList = ({ nodes = [], getData = () => {} }) => {
           <td>${node.nodeData?.info?.cpuCores ?? "—"}</td>
           <td>${getRamAvailable(node)}</td>
           <td>${flags.map(flag => html`<span class="badge bg-secondary me-1" title=${flag === "L" ? "Locked" : "Automatically provisioned"}>${flag}</span>`)}</td>
-          <td>${nodeUrl(node.nodeData) ? html`<a href=${nodeUrl(node.nodeData)} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open node</a>` : "—"}</td>
+          <td>${nodeUrl(node.nodeData) ? html`<button type="button" class="btn btn-sm btn-outline-primary" onClick=${() => openNode(idx + 1)}>Open node</button>` : "—"}</td>
           <td>
             <div class="btn-group" role="group">
               <${LockBtn} isLock=${node.isLocked} number=${idx + 1} />
@@ -151,7 +172,8 @@ const bytesToSize = (bytes, decimals = 2) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
 };
 
-// Only a bare HTTP(S) endpoint is allowed; never carry worker credentials into links.
+// Only a bare HTTP(S) endpoint is valid. The node list never carries worker credentials;
+// the token is added server-side by POST /r/node/open for an authenticated admin.
 export const nodeUrl = (data = {}) => {
   const { hostname, port } = data || {};
   const numericPort = Number(port);

@@ -23,10 +23,55 @@ async function makeHtml() {
 }
 
 async function testTaskList(html) {
-    global.__taskUi = { html };
-    const source = read('../public/component/taskList.mjs')
-        .replace(/^import .*;$/m, 'const { html } = globalThis.__taskUi;');
-    const { TaskList, formatTaskDate } = await import(moduleUrl(source));
+    global.__taskUi = { html, useState: initial => [initial, () => {}], Dialog: () => null };
+    const source = read('../public/component/taskList.mjs').replace(/^import .*;\r?\n/gm, '');
+    const { TaskList, formatTaskDate, formatAge, filterTasks, staleRows, stopWorkerDefaults, summarizeRemoval } =
+        await import(moduleUrl(`const { html, useState, Dialog } = globalThis.__taskUi;\n${source}`));
+
+    // Pure helpers (no hooks needed).
+    const NOW = 10 * 3600 * 1000;
+    assert.strictEqual(formatAge(NOW - 30000, NOW), '<1m');
+    assert.strictEqual(formatAge(NOW - 5 * 60000, NOW), '5m');
+    assert.strictEqual(formatAge(NOW - 3 * 3600000, NOW), '3h');
+    assert.strictEqual(formatAge(0, 3 * 24 * 3600000), '3d');
+    for (const bad of [null, undefined, NaN, NOW + 1]) assert.strictEqual(formatAge(bad, NOW), '—');
+    const sample = [
+        { uuid: 'a1', name: 'Alpha', owner: 'ann@portals', state: 'queued', stale: true, source: 'pending', node: null },
+        { uuid: 'b2', name: 'Beta', owner: 'bob@portals', state: 'assigned', stale: true, source: 'route', node: { hostname: 'w1', port: 3001, online: false, autoSpawned: true } },
+        { uuid: 'c3', name: 'Gamma', owner: 'bob@portals', state: 'assigned', stale: false, source: 'route', node: { hostname: 'w2', port: 3001, online: true, autoSpawned: false } },
+        { uuid: 'd4', name: 'Delta', owner: null, state: 'completed', stale: false, source: 'route', node: { hostname: 'w2', port: 3001, online: true, autoSpawned: false } }
+    ];
+    assert.deepStrictEqual(filterTasks(sample, { owner: 'bob@portals', state: '', text: '', staleOnly: false }).map(t => t.uuid), ['b2', 'c3']);
+    assert.deepStrictEqual(filterTasks(sample, { owner: '', state: 'completed', text: '', staleOnly: false }).map(t => t.uuid), ['d4']);
+    assert.deepStrictEqual(filterTasks(sample, { owner: '', state: '', text: 'W1:3001', staleOnly: false }).map(t => t.uuid), ['b2'], 'search covers the worker');
+    assert.deepStrictEqual(filterTasks(sample, { owner: '', state: '', text: 'ann', staleOnly: true }).map(t => t.uuid), ['a1']);
+    assert.strictEqual(filterTasks(sample).length, 4);
+    assert.deepStrictEqual(staleRows(sample).map(t => t.uuid), ['a1', 'b2']);
+    const onlineStale = [{ uuid: 'x', stale: true, source: 'route', node: { online: true } }];
+    assert.deepStrictEqual(staleRows(onlineStale), [], 'online routed rows are never auto-selected');
+    assert.deepStrictEqual(stopWorkerDefaults(sample, ['b2']), { available: true, checked: true });
+    assert.deepStrictEqual(stopWorkerDefaults(sample, ['b2', 'c3']), { available: true, checked: false }, 'mixed selection is not pre-checked');
+    assert.deepStrictEqual(stopWorkerDefaults(sample, ['c3']), { available: false, checked: false });
+    assert.deepStrictEqual(stopWorkerDefaults(sample, ['a1']), { available: false, checked: false });
+    assert.strictEqual(summarizeRemoval({ results: [{ outcome: 'removed' }, { outcome: 'removed' }, { outcome: 'removed' },
+        { outcome: 'not_found' }, { outcome: 'failed', uuid: 'zz', errors: ['route: boom'] }] }),
+        'Removed 3. 1 already gone. 1 failed: zz route: boom');
+    assert.match(summarizeRemoval({ results: [], persist: 'failed' }), /could not be saved/);
+
+    // Rendering: owner, age and stale badge are visible; controls appear only when removal is wired.
+    const rendered = TaskList({ tasks: sample });
+    assert.match(text(rendered), /ann@portals/);
+    assert.match(text(rendered), /Unknown/, 'unknown owners are labelled');
+    assert.match(text(rendered), /Stale/);
+    assert.match(text(rendered), /4 of 4/);
+    assert.ok(descendants(rendered).some(node => node.type === 'tr' && node.props.class === 'table-warning'));
+    assert.doesNotMatch(text(rendered), /Remove selected/);
+    const withRemoval = TaskList({ tasks: sample, onRemove: async () => ({}) });
+    assert.match(text(withRemoval), /Remove selected \(0\)/);
+    assert.match(text(withRemoval), /Select stale/);
+    assert.strictEqual(descendants(withRemoval).filter(node => node.type === 'button' && text(node) === 'Remove').length, 4);
+    const checkboxes = descendants(withRemoval).filter(node => node.type === 'input' && node.props.type === 'checkbox' && /^Select /.test(node.props['aria-label'] || ''));
+    assert.ok(checkboxes.length >= 4);
     for (const value of [null, undefined, NaN, Infinity, 1e20]) assert.strictEqual(formatTaskDate(value), '—');
     assert.notStrictEqual(formatTaskDate(0), '—');
     assert.match(text(TaskList({})), /No tracked tasks/);
@@ -61,7 +106,7 @@ async function testTaskList(html) {
 }
 
 async function testNodeList(html) {
-    global.__nodeUi = {html, useState: () => [false, () => {}],
+    global.__nodeUi = {html, useState: initial => [initial, () => {}],
         postFetch: () => {}, deleteFetch: () => {}, DeleteInstanceDialog: () => {}};
     const source = read('../public/component/nodeList.mjs').replace(/^import .*;\r?\n/gm, '');
     const {NodeList, nodeUrl} = await import(moduleUrl(`const {html, useState, postFetch, deleteFetch, DeleteInstanceDialog} = globalThis.__nodeUi;\n${source}`));
@@ -70,10 +115,11 @@ async function testNodeList(html) {
         nodeData: {hostname: 'worker.example', port: 3001, token: 'never-in-link', info: {totalMemory: 0}}}];
     const tree = NodeList({nodes: rows});
     assert.match(text(tree), /Missing metadata/);
-    const link = descendants(tree).find(node => node.type === 'a');
-    assert.strictEqual(link.props.href, 'http://worker.example:3001/');
-    assert.ok(!link.props.href.includes('never-in-link'));
-    assert.strictEqual(link.props.referrerpolicy, 'no-referrer');
+    assert.ok(!descendants(tree).some(node => node.type === 'a'), 'no worker link in the page');
+    assert.ok(!JSON.stringify(tree).includes('never-in-link'), 'the token must not be rendered');
+    const open = descendants(tree).find(node => node.type === 'button' && text(node) === 'Open node');
+    assert.ok(open, 'Open node is a button that asks the server for the URL');
+    assert.strictEqual(typeof open.props.onClick, 'function');
     assert.strictEqual(nodeUrl({hostname: '::1', port: 443}), 'https://[::1]/');
     for (const hostname of ['javascript:alert(1)', 'user@host', 'host/path', 'host?token=x', 'bad host']) {
         assert.strictEqual(nodeUrl({hostname, port: 3001}), null);
@@ -165,11 +211,16 @@ async function testApp(html) {
         return timerId;
     };
     global.clearInterval = id => timers.delete(id);
+    const posts = [];
     const components = Object.fromEntries(['TaskList', 'NodeList', 'SplatList', 'Header', 'RefreshButton', 'AddInstanceButton']
         .map(name => [name, Object.defineProperty(() => {}, 'name', { value: name })]));
     global.__taskUi = { html, ...harness.hooks, ...components,
         clearAdminToken: () => { cleared++; },
         getStartupToken: () => '', validateAdminToken: async () => true, cancelAdminValidation: () => {},
+        postFetch: async (url, { body }) => {
+            posts.push({ url, body });
+            return { ok: true, json: async () => ({ results: [{ uuid: body.uuids[0], outcome: 'removed' }], persist: 'ok' }) };
+        },
         getFetch: async url => {
             calls.push(url);
             if (url === '/r/info') return response({ name: 'ClusterODX', version: 'test' });
@@ -182,7 +233,7 @@ async function testApp(html) {
     };
     let source = read('../public/app.mjs').replace(/^import .*;\r?\n/gm, '');
     source = `const { html, useState, useEffect, useCallback, useRef, TaskList, NodeList, SplatList, Header,
-        RefreshButton, AddInstanceButton, clearAdminToken, getFetch, getStartupToken,
+        RefreshButton, AddInstanceButton, clearAdminToken, getFetch, postFetch, getStartupToken,
         validateAdminToken, cancelAdminValidation } = globalThis.__taskUi;\n${source}`;
     try {
         const { default: App } = await import(moduleUrl(source));
@@ -205,6 +256,11 @@ async function testApp(html) {
         render();
         assert.deepStrictEqual(component('TaskList').props.tasks, [{ uuid: 'first' }]);
         assert.strictEqual(component('TaskList').props.loading, false);
+        // Task removal is wired through postFetch and surfaces the server's results.
+        const removal = await component('TaskList').props.onRemove(['u1'], { dryRun: true, stopWorker: true });
+        assert.deepStrictEqual(posts[0], { url: '/r/task/remove', body: { uuids: ['u1'], dryRun: true, stopWorker: true } });
+        assert.strictEqual(removal.results[0].outcome, 'removed');
+        assert.strictEqual(typeof component('TaskList').props.onChanged, 'function');
 
         const older = deferred();
         const newer = deferred();

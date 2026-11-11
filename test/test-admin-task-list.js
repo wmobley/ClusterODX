@@ -8,7 +8,7 @@ const adminweb = require('../adminweb');
 
 const SECRET = 'seeded-private-credential';
 const rowKeys = ['uuid', 'name', 'source', 'state', 'statusCode', 'imagesCount',
-    'dateCreated', 'accessed', 'tapisJobId', 'node'].sort();
+    'dateCreated', 'accessed', 'tapisJobId', 'node', 'owner', 'stale', 'staleReason'].sort();
 const assertSafe = rows => {
     assert.ok(!JSON.stringify(rows).includes(SECRET), 'private records must not be serialized');
     for (const row of rows) {
@@ -18,7 +18,7 @@ const assertSafe = rows => {
             assert.ok(row[field] === null || (typeof row[field] === 'number' && Number.isFinite(row[field])), field);
         }
         assert.ok(row.tapisJobId === null || typeof row.tapisJobId === 'string');
-        if (row.node) assert.deepStrictEqual(Object.keys(row.node).sort(), ['hostname', 'port']);
+        if (row.node) assert.deepStrictEqual(Object.keys(row.node).sort(), ['autoSpawned', 'hostname', 'online', 'port']);
     }
 };
 const makeNode = (job = 'tapis-routed') => Object.freeze({
@@ -81,7 +81,8 @@ async function testAggregation() {
     assert.deepStrictEqual(assigned, {
         uuid: 'waiting', name: 'Flight waiting', source: 'route', state: 'assigned',
         statusCode: 20, imagesCount: 12, dateCreated: 1000, accessed: 3000,
-        tapisJobId: 'tapis-routed', node: { hostname: 'worker.example', port: 3001 }
+        tapisJobId: 'tapis-routed', node: { hostname: 'worker.example', port: 3001, online: null, autoSpawned: null },
+        owner: null, stale: false, staleReason: null
     });
     for (const state of ['failed', 'completed', 'canceled']) {
         assert.strictEqual(merged.find(row => row.uuid === state).state, state,
@@ -90,7 +91,8 @@ async function testAggregation() {
     assert.deepStrictEqual(merged.find(row => row.uuid === 'route-only'), {
         uuid: 'route-only', name: 'route-only', source: 'route', state: 'assigned',
         statusCode: null, imagesCount: null, dateCreated: null, accessed: 3004,
-        tapisJobId: null, node: { hostname: 'worker.example', port: 3001 }
+        tapisJobId: null, node: { hostname: 'worker.example', port: 3001, online: null, autoSpawned: null },
+        owner: null, stale: false, staleReason: null
     });
     const routeWithoutJob = await aggregate([summarize('waiting', 20)], {
         waiting: { node: makeNode(null), accessed: 3000 }
@@ -121,6 +123,83 @@ async function testAggregation() {
     assert.strictEqual(malformed.find(row => row.uuid === 'no-endpoint').node, null);
 }
 
+// A structurally valid (unsigned) Tapis JWT: only the claims are decoded.
+const jwtFor = (username, tenant = 'portals') => `h.${Buffer.from(JSON.stringify({
+    'tapis/username': username, 'tapis/tenant_id': tenant })).toString('base64url')}.s`;
+
+async function testOwnerAndStale() {
+    const { ownerLabel } = require('../libs/tapisIdentity');
+    assert.strictEqual(ownerLabel(jwtFor('analacau')), 'analacau@portals');
+    assert.strictEqual(ownerLabel('not-a-jwt', { owner: 'wmobley', tenant: 'portals' }), 'wmobley@portals');
+    assert.strictEqual(ownerLabel(null, { owner: 'wmobley@portals', tenant: 'other' }), 'wmobley@portals');
+    assert.strictEqual(ownerLabel(null, { owner: 'solo' }), 'solo');
+    assert.strictEqual(ownerLabel(null, { owner: '  ' }), null);
+    assert.strictEqual(ownerLabel(undefined), null);
+
+    const now = 10 * 60 * 60 * 1000;
+    const hour = 60 * 60 * 1000;
+    const online = flag => Object.assign({}, makeNode(), { isOnline: () => flag, isAutoSpawned: () => true });
+    const withOwner = (node, owner, tenant) => Object.assign({}, node, { nodeData: { tapisJobOwner: owner, tapisJobOwnerTenant: tenant } });
+    const list = (pending, routes, provider = null, staleAfterMs = 6 * hour) =>
+        listTasks({ tasktable: { listSummaries: async () => pending }, routetable: { findByNode: async () => routes },
+            provider, staleAfterMs, now });
+    const byId = rows => Object.fromEntries(rows.map(row => [row.uuid, row]));
+
+    // Pending rows: stale only after the window, never when terminal.
+    const rows = byId(await list([
+        summarize('fresh', 20, { accessed: now - hour, owner: 'fresh-owner@portals' }),
+        summarize('old', 20, { accessed: now - 7 * hour }),
+        summarize('old-queued', 10, { accessed: now - 7 * hour }),
+        summarize('old-done', 40, { accessed: now - 70 * hour }),
+        summarize('old-failed', 30, { accessed: now - 70 * hour })
+    ], {}));
+    assert.strictEqual(rows.fresh.stale, false);
+    assert.strictEqual(rows.old.stale, true);
+    assert.strictEqual(rows.old.staleReason, 'inactive');
+    assert.strictEqual(rows['old-queued'].stale, true);
+    assert.strictEqual(rows['old-done'].stale, false);
+    assert.strictEqual(rows['old-failed'].stale, false);
+    assert.strictEqual(rows.fresh.owner, 'fresh-owner@portals');
+    assert.strictEqual((await list([summarize('edge', 20, { accessed: now - 2 * hour })], {}, null, hour))[0].stale, true, 'window comes from the option');
+
+    // Routed rows: stale only when the worker is offline, however old the activity.
+    const routed = byId(await list([summarize('terminal-offline', 30)], {
+        'online-old': { node: online(true), accessed: 1 },
+        'offline': { node: online(false), accessed: now },
+        'terminal-offline': { node: online(false), accessed: now }
+    }));
+    assert.strictEqual(routed['online-old'].stale, false, 'a healthy routed job is never stale');
+    assert.strictEqual(routed.offline.stale, true);
+    assert.strictEqual(routed.offline.staleReason, 'worker_offline');
+    assert.strictEqual(routed['terminal-offline'].stale, false);
+    assert.deepStrictEqual(routed.offline.node, { hostname: 'worker.example', port: 3001, online: false, autoSpawned: true });
+
+    // Owner sources in priority order; tokens never reach the row.
+    const owners = byId(await list([
+        summarize('from-table', 20, { owner: 'table@portals' }),
+        summarize('from-pending', 20),
+        summarize('route-wins', 20, { owner: 'table@portals' })
+    ], {
+        'route-wins': { node: withOwner(online(true), 'node-owner', 'portals'), accessed: now, token: jwtFor('route-user') },
+        'from-node': { node: withOwner(online(true), 'node-owner', 'portals'), accessed: now },
+        'unknown': { node: online(true), accessed: now }
+    }, { findPendingTask: uuid => uuid === 'from-pending' ? { tapisJobOwner: 'pending-owner', tapisJobOwnerTenant: 'portals', token: SECRET } : null }));
+    assert.strictEqual(owners['from-table'].owner, 'table@portals');
+    assert.strictEqual(owners['from-pending'].owner, 'pending-owner@portals');
+    assert.strictEqual(owners['route-wins'].owner, 'route-user@portals');
+    assert.strictEqual(owners['from-node'].owner, 'node-owner@portals');
+    assert.strictEqual(owners.unknown.owner, null);
+    assert.ok(!JSON.stringify(owners).includes(SECRET));
+    assert.ok(!JSON.stringify(owners).includes('.s"'), 'no JWT in the JSON');
+
+    // The real table derives the owner from the stored token without returning it.
+    await tasktable.add('owned-task', { taskInfo: { name: 'Owned' } }, jwtFor('analacau'));
+    const summary = (await tasktable.listSummaries()).find(row => row.uuid === 'owned-task');
+    assert.strictEqual(summary.owner, 'analacau@portals');
+    assert.ok(!JSON.stringify(summary).includes(jwtFor('analacau')));
+    await tasktable.delete('owned-task');
+}
+
 async function testRealSummaries() {
     assert.deepStrictEqual(await tasktable.listSummaries(), [], 'uninitialized table should be empty');
     const originalSetInterval = global.setInterval;
@@ -140,7 +219,7 @@ async function testRealSummaries() {
     await tasktable.add('real-task', obj, SECRET);
     const first = await tasktable.listSummaries();
     assert.deepStrictEqual(Object.keys(first[0]).sort(),
-        ['uuid', 'name', 'statusCode', 'imagesCount', 'dateCreated', 'accessed'].sort());
+        ['uuid', 'name', 'statusCode', 'imagesCount', 'dateCreated', 'accessed', 'owner'].sort());
     assert.ok(!JSON.stringify(first).includes(SECRET));
     assert.strictEqual(first[0].imagesCount, 0);
     first[0].name = 'client mutation';
@@ -237,6 +316,7 @@ async function testHttp() {
 (async () => {
     await testAggregation();
     await testRealSummaries();
+    await testOwnerAndStale();
     await testHttp();
     console.log('ADMIN TASK LIST TEST PASSED');
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

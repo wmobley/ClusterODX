@@ -25,7 +25,8 @@ const asrProvider = require("./libs/asrProvider");
 const config = require("./config");
 const tasktable = require("./libs/tasktable");
 const routetable = require("./libs/routetable");
-const { listTasks } = require("./libs/adminTasks");
+const { listTasks, removeTasks, parseRemoveRequest, DEFAULT_STALE_AFTER_MS, MAX_REMOVE_BATCH, UUID_PATTERN } = require("./libs/adminTasks");
+const { nodeUrlWithToken } = require("./libs/nodeLink");
 const utils = require("./libs/utils");
 const { completeResumeRegistration, extractBearerToken, normalizeRegistration } = require("./libs/tapisRegistration");
 const { submitPendingTask } = require("./libs/tapisWorker");
@@ -493,6 +494,19 @@ module.exports = {
           }
           await submitPendingTask(pending, node);
           taskSubmitted = true;
+          // The task may have been removed by an admin during the (minutes-long) upload.
+          // Nothing may be awaited between this check and routetable.add's synchronous insert.
+          if (typeof provider.findPendingTask === 'function' && provider.findPendingTask(pending.taskId) !== pending) {
+            try { await node.taskRemove(pending.taskId); } catch (_error) { /* best effort */ }
+            if (typeof provider.releasePendingTask === 'function') provider.releasePendingTask(pending);
+            logHandoffEvent(logger, "webhook_rejected", Object.assign(registrationFields(), {
+              task_id: pending.taskId,
+              tapis_job_id: pending.tapisJobId,
+              outcome: "rejected",
+              error_class: "task_removed"
+            }));
+            return res.status(409).json({ error: "Task was removed during registration" });
+          }
           await routetable.add(pending.taskId, node, pending.token);
           await tasktable.delete(pending.taskId);
         }
@@ -679,6 +693,7 @@ module.exports = {
         error.code = 'ADMIN_FORBIDDEN';
         throw error;
       }
+      return { username, tenantId: tenant, label: `${username}@${tenant}` };
     };
 
     const requireTapisJwt = async (req, res, next) => {
@@ -686,7 +701,7 @@ module.exports = {
       if (!token) return res.status(401).json({ error: 'Tapis JWT bearer token required' });
 
       try {
-        await validateTapisAdminToken(token);
+        res.locals.admin = await validateTapisAdminToken(token);
         return next();
       } catch (error) {
         if (error && error.code === 'ADMIN_FORBIDDEN') {
@@ -706,6 +721,38 @@ module.exports = {
       res.set("Cache-Control", "no-store");
       next();
     });
+
+    // Admin write routes that remove records or reveal a worker token. They fail
+    // closed (see requireAdminWrite) and denied attempts are logged without credentials.
+    const guardedWrites = ["/r/task/remove", "/r/node/open"];
+    app.use(guardedWrites, (req, res, next) => {
+      res.set("Cache-Control", "no-store");
+      const target = req.baseUrl; // later routers rewrite baseUrl
+      res.on("finish", () => {
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          logger.warn(`[ADMIN] denied ${req.method} ${target} from ${req.ip}`);
+        }
+      });
+      next();
+    });
+    if (useTapisJwt && !allowedTenants.length && !allowedUsers.length) {
+      logger.warn("Admin web JWT mode has no admin-web-allowed-tenants or admin-web-allowed-users: any valid Tapis user can sign in, and task removal and node open are disabled until one is set.");
+    }
+    const requireAdminWrite = (req, res, next) => {
+      if (useTapisJwt) {
+        if (!allowedTenants.length && !allowedUsers.length) {
+          return res.status(403).json({ error: "This action requires admin-web-allowed-tenants or admin-web-allowed-users to be configured" });
+        }
+        return next();
+      }
+      // Browsers attach Basic credentials automatically, so require an explicit same-origin signal.
+      let sameHost = false;
+      try { sameHost = !!req.get("origin") && new URL(req.get("origin")).host === req.get("host"); } catch (_error) { /* rejected below */ }
+      if (req.get("sec-fetch-site") !== "same-origin" && !sameHost) {
+        return res.status(403).json({ error: "Same-origin request required" });
+      }
+      return next();
+    };
 
     if (useTapisJwt) {
       app.use(express.static("public"));
@@ -746,6 +793,11 @@ module.exports = {
         })
       );
 
+      app.use((req, res, next) => {
+        res.locals.admin = { label: "basic", remoteAddress: req.ip };
+        next();
+      });
+
       app.get("/signout", (req, res) => {
         res.status(401).send('Signed out. <br /> <a href="/">Sign back in</a>');
       });
@@ -785,11 +837,46 @@ module.exports = {
     app.get("/r/task/list", async (_req, res) => {
       res.set('Cache-Control', 'no-store');
       try {
-        res.json(await listTasks({ tasktable, routetable, provider: asrProvider.get() }));
+        const staleHours = Number(options.taskStaleHours);
+        const staleAfterMs = Number.isFinite(staleHours) && staleHours > 0 ? staleHours * 3600 * 1000 : DEFAULT_STALE_AFTER_MS;
+        res.json(await listTasks({ tasktable, routetable, provider: asrProvider.get(), staleAfterMs }));
       } catch (_error) {
         logger.warn('Cannot build admin task list');
         res.status(500).json({ error: 'Unable to load tasks' });
       }
+    });
+
+    // One removal request at a time keeps bulk Tapis cancels and route writes serialized.
+    let removalInProgress = false;
+    app.post("/r/task/remove", requireAdminWrite, async (req, res) => {
+      if (!req.is("application/json")) return res.status(400).json({ error: "Expected application/json" });
+      const parsed = parseRemoveRequest(req.body);
+      if (parsed.error) return res.status(400).json({ error: parsed.error });
+      if (removalInProgress) return res.status(409).json({ error: "Another removal is in progress" });
+      removalInProgress = true;
+      try {
+        const outcome = await removeTasks({
+          uuids: parsed.uuids, stopWorker: parsed.stopWorker, dryRun: parsed.dryRun,
+          admin: Object.assign({}, res.locals.admin, { remoteAddress: req.ip }),
+          deps: { tasktable, routetable, provider: asrProvider.get(), nodes, netutils, utils, logger }
+        });
+        return res.json(outcome);
+      } catch (_error) {
+        logger.warn("Admin task removal failed unexpectedly");
+        return res.status(500).json({ error: "Unable to remove tasks" });
+      } finally {
+        removalInProgress = false;
+      }
+    });
+
+    // The worker token is revealed only here, to an authenticated admin, never in a list.
+    app.post("/r/node/open", requireAdminWrite, (req, res) => {
+      const node = nodes.nth(req.body && req.body.number);
+      if (!node) return res.status(404).json({ error: "Node not found" });
+      const url = nodeUrlWithToken(node);
+      if (!url) return res.status(400).json({ error: "Node has no usable address" });
+      logger.info(`[ADMIN] node open ${JSON.stringify({ node: safeNodeEndpoint(node.hostname(), node.port()), admin: res.locals.admin && res.locals.admin.label || null, remoteAddress: req.ip })}`);
+      return res.json({ url });
     });
 
     app.delete("/r/node", async (req, res) => {

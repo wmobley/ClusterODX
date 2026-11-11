@@ -48,7 +48,7 @@ let argDefs = {
 
     int: ['port', 'admin-cli-port', 'admin-web-port', 
           'secure-port', 'upload-max-speed', 'flood-limit', 'stale-uploads-timeout',
-          'webodm-timeout-ms'] // for cast only, not used by minimist
+          'webodm-timeout-ms', 'admin-task-stale-hours'] // for cast only, not used by minimist
 };
 let argv = require('minimist')(process.argv.slice(2), argDefs);
 
@@ -66,6 +66,7 @@ Options:
     --admin-web-use-tapis-jwt <boolean> 	Authenticate the admin web interface with Tapis JWTs (default: true)
     --admin-web-allowed-tenants <string> 	Comma-separated Tapis tenants allowed in JWT web mode (default: none)
     --admin-web-allowed-users <string> 	Comma-separated Tapis usernames allowed in JWT web mode (default: none)
+    --admin-task-stale-hours <number> 	Hours of silence after which a pending task is flagged stale in the admin list (default: 6)
     --log-level <logLevel>	Set log level verbosity (default: info)
     -c, --cloud-provider	Cloud provider to use (default: local)
     --upload-max-speed <number>	Upload to processing nodes speed limit in bytes / second (default: no limit)
